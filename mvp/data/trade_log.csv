@@ -1,0 +1,209 @@
+2025-09-09T14:17:31.806000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 112230.80 超过单次上限 2000.00; 当前持仓 0.00 + 下单 112230.80 超过仓位上限 2000.00; 无法估算滑点：缺少价格信息; 单笔潜在亏损 224.46 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T14:35:42.907000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111605.30 超过单次上限 2000.00; 当前持仓 0.00 + 下单 111605.30 超过仓位上限 2000.00; 无法估算滑点：缺少价格信息; 单笔潜在亏损 223.21 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T14:35:42.900000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4290.02 超过单次上限 2000.00; 当前持仓 0.00 + 下单 4290.02 超过仓位上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:36:26.407000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:36:26.400000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4290.09 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:54.907000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111726.70 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:54.900000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4295.97 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:54.907000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111730.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:54.900000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4296.20 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55.007000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111739.20 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4296.27 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111739.20 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55.100000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4296.28 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111739.20 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:38:55.100000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4296.28 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:51:18.207000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111606.10 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:52:11.507000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111600.80 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:52:11.508000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4290.60 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:15.107000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111711.60 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:15.108000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4297.22 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:15.907000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111706.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:15.908000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4297.03 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:17.207000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111700.10 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:17.308000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4297.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:18.607000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111705.70 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:18.608000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4297.22 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:32.407000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:53:33.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111723.30 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:33.108000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4299.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:34.007000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111727.80 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:53:34.008000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4299.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:54:35.907000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111788.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:54:35.908000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4302.32 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:54:36.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111788.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:54:36.108000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4302.41 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:54:59.696959+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:00.489040+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:00.794125+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:00.802241+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:02.135905+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111848.70 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:02.148606+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:03.239390+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111848.70 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:03.248798+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:04.438126+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111850.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:04.451293+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:05.679312+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111850.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:05.691798+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.01 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:06.816439+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111849.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:06.831974+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.28 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:07.882715+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111849.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:07.892195+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.53 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:10.262021+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111852.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:10.272251+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4305.72 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:11.619116+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111852.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:11.629127+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4306.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:13.593430+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111854.40 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:13.600098+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4306.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:55:15.023464+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:15.031876+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:16.363066+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:16.373824+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:17.710144+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:17.720582+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:19.605519+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:19.616062+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:20.883181+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:20.890156+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:22.178083+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:22.187178+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:23.623554+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:23.632238+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:25.185004+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:25.194519+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:26.297460+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:26.304018+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:27.772918+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:27.778756+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:29.252945+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:29.258645+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:30.802848+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:30.811777+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:32.151032+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:55:32.160283+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:57:17.707000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111777.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:17.708000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4300.83 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:21.407000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111778.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:21.408000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4300.94 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:23.707000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111778.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:23.708000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4300.94 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:25.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111777.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:25.108000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4300.89 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:26.907000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111777.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:26.908000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4300.93 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:27.307000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111777.90 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:57:27.308000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4301.04 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:54.007000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111751.60 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:53.908000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4302.59 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:54.107000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111751.50 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:54.208000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4302.60 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:56.907000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111740.10 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:56.908000+00:00,mock,ETH-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 4302.60 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:58.607000+00:00,mock,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111740.00 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:58:58.508000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4302.37 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:59:51.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:59:51.008000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T14:59:52.107000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111726.30 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:59:52.108000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4304.75 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:59:52.407000+00:00,mock,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111726.20 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T14:59:52.408000+00:00,mock,ETH-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 4304.94 超过单次上限 2000.00; 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:10.807000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:10.808000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:11.807000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:11.808000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:13.007000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:13.008000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:14.007000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:14.008000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:15.007000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:15.008000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:15.907000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:15.908000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:16.907000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:16.908000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:17.607000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:17.608000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:19.807000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:19.708000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:21.307000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:21.308000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:22.307000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:22.308000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:22.907000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:22.908000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:23.107000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:23.108000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:24.807000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:24.808000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:28.707000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:02:28.708000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,risk_reject: 无法估算滑点：缺少价格信息,False,,-2,risk_block,{}
+2025-09-09T15:03:42.507000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430223934,0,mock-ok,{}
+2025-09-09T15:03:42.508000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430223954,0,mock-ok,{}
+2025-09-09T15:03:42.907000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430225189,0,mock-ok,{}
+2025-09-09T15:03:42.908000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430225202,0,mock-ok,{}
+2025-09-09T15:04:46.107000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430287111,0,mock-ok,{}
+2025-09-09T15:04:46.108000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430287133,0,mock-ok,{}
+2025-09-09T15:04:47.007000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430288415,0,mock-ok,{}
+2025-09-09T15:04:47.108000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430288432,0,mock-ok,{}
+2025-09-09T15:04:47.607000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430289557,0,mock-ok,{}
+2025-09-09T15:04:47.608000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430289576,0,mock-ok,{}
+2025-09-09T15:05:01.407000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430302865,0,mock-ok,{}
+2025-09-09T15:05:01.408000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430302880,0,mock-ok,{}
+2025-09-09T15:05:02.007000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430304123,0,mock-ok,{}
+2025-09-09T15:05:02.008000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430304142,0,mock-ok,{}
+2025-09-09T15:05:03.407000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430305856,0,mock-ok,{}
+2025-09-09T15:05:03.408000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430305873,0,mock-ok,{}
+2025-09-09T15:05:56.607000+00:00,mock,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757430357533,0,mock-ok,{}
+2025-09-09T15:05:56.608000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430357551,0,mock-ok,{}
+2025-09-09T15:05:57.207000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430359362,0,mock-ok,{}
+2025-09-09T15:05:57.108000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757430359376,0,mock-ok,{}
+2025-09-09T15:18:17.100000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T15:18:17.103000+00:00,mock,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757431099106,0,mock-ok,{}
+2025-09-09T15:18:17.400000+00:00,mock,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],True,mock-1757431100296,0,mock-ok,{}
+2025-09-09T15:18:17.403000+00:00,mock,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],True,mock-1757431100313,0,mock-ok,{}
+2025-09-09T15:19:12+00:00,real,BTC-USDT-SWAP,buy,,0.001,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T15:20:06.500000+00:00,real,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],False,,50110,Your IP 144.24.60.69 is not included in your API key's ea2f78de-a081-42d0-816c-06e98496ecdc IP whitelist.,"{""msg"": ""Your IP 144.24.60.69 is not included in your API key's ea2f78de-a081-42d0-816c-06e98496ecdc IP whitelist."", ""code"": ""50110""}"
+2025-09-09T15:24:15+00:00,real,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431462322""}], ""inTime"": ""1757431462322078"", ""msg"": ""All operations failed"", ""outTime"": ""1757431462322288""}"
+2025-09-09T15:25:08+00:00,real,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431509018""}], ""inTime"": ""1757431509018755"", ""msg"": ""All operations failed"", ""outTime"": ""1757431509018957""}"
+2025-09-09T15:25:08.003000+00:00,real,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431509459""}], ""inTime"": ""1757431509459803"", ""msg"": ""All operations failed"", ""outTime"": ""1757431509459923""}"
+2025-09-09T15:25:08+00:00,real,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431509881""}], ""inTime"": ""1757431509881134"", ""msg"": ""All operations failed"", ""outTime"": ""1757431509881279""}"
+2025-09-09T15:25:08.003000+00:00,real,ETH-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431510336""}], ""inTime"": ""1757431510336713"", ""msg"": ""All operations failed"", ""outTime"": ""1757431510336875""}"
+2025-09-09T15:25:09+00:00,real,BTC-USDT-SWAP,sell,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431511403""}], ""inTime"": ""1757431511403174"", ""msg"": ""All operations failed"", ""outTime"": ""1757431511403354""}"
+2025-09-09T15:26:35+00:00,real,BTC-USDT-SWAP,buy,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431597009""}], ""inTime"": ""1757431597009559"", ""msg"": ""All operations failed"", ""outTime"": ""1757431597009700""}"
+2025-09-09T15:26:35.003000+00:00,real,ETH-USDT-SWAP,buy,,0.001,depth_imbalance[notional],False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51121"", ""sMsg"": ""Order quantity must be a multiple of the lot size."", ""tag"": """", ""ts"": ""1757431597445""}], ""inTime"": ""1757431597445400"", ""msg"": ""All operations failed"", ""outTime"": ""1757431597445544""}"
+2025-09-09T15:29:14+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111263.90 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111263.90 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:14.003000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.04 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:14.900000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111264.00 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111264.00 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:14.903000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.04 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:15.900000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111263.90 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111263.90 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:15.903000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.05 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:16.800000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111264.70 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111264.70 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:16.803000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.05 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:18.800000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111275.80 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111275.80 超过仓位上限 2000.00; 单笔潜在亏损 222.55 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:18.703000+00:00,real,ETH-USDT-SWAP,buy,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.05 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:20.400000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111275.80 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111275.80 超过仓位上限 2000.00; 单笔潜在亏损 222.55 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:20.303000+00:00,real,ETH-USDT-SWAP,buy,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.05 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:22.400000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111275.80 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111275.80 超过仓位上限 2000.00; 单笔潜在亏损 222.55 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:22.403000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.04 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:22.900000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111268.00 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111268.00 超过仓位上限 2000.00; 单笔潜在亏损 222.54 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:22.903000+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.04 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:24.800000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111267.20 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111267.20 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:24.803000+00:00,real,ETH-USDT-SWAP,buy,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.06 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:29:26.100000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 下单名义金额 111267.20 超过单次上限 50000.00; 当前持仓 0.00 + 下单 111267.20 超过仓位上限 2000.00; 单笔潜在亏损 222.53 超过上限 100.00,False,,-2,risk_block,{}
+2025-09-09T15:29:26.003000+00:00,real,ETH-USDT-SWAP,buy,,1.0,risk_reject: 当前持仓 0.00 + 下单 4289.47 超过仓位上限 2000.00,False,,-2,risk_block,{}
+2025-09-09T15:30:11.100000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111232.20 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:30:11.103000+00:00,real,ETH-USDT-SWAP,buy,,1.0,depth_imbalance[notional],True,2849758282021392384,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849758282021392384"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757431815047""}], ""inTime"": ""1757431815046990"", ""msg"": """", ""outTime"": ""1757431815049315""}"
+2025-09-09T15:31:14.200000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111200.00 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:31:14.203000+00:00,real,ETH-USDT-SWAP,sell,,1.0,depth_imbalance[notional],True,2849760324848766976,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849760324848766976"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757431875928""}], ""inTime"": ""1757431875928083"", ""msg"": """", ""outTime"": ""1757431875930309""}"
+2025-09-09T15:31:14.200000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111200.00 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:31:14.203000+00:00,real,ETH-USDT-SWAP,sell,,1.0,depth_imbalance[notional],True,2849760339210063872,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849760339210063872"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757431876356""}], ""inTime"": ""1757431876356013"", ""msg"": """", ""outTime"": ""1757431876358569""}"
+2025-09-09T15:32:02.200000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111111.00 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:32:02.103000+00:00,real,ETH-USDT-SWAP,buy,,1.0,depth_imbalance[notional],True,2849762025387380736,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849762025387380736"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757431926608""}], ""inTime"": ""1757431926608107"", ""msg"": """", ""outTime"": ""1757431926610284""}"
+2025-09-09T15:33:07.700000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111142.10 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:33:07.703000+00:00,real,ETH-USDT-SWAP,sell,,1.0,depth_imbalance[notional],True,2849764187400097792,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849764187400097792"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757431991041""}], ""inTime"": ""1757431991041064"", ""msg"": """", ""outTime"": ""1757431991043253""}"
+2025-09-09T15:34:02.100000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111220.10 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:34:02.103000+00:00,real,ETH-USDT-SWAP,sell,,1.0,depth_imbalance[notional],True,2849766126611386368,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849766126611386368"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757432048834""}], ""inTime"": ""1757432048834089"", ""msg"": """", ""outTime"": ""1757432048835745""}"
+2025-09-09T15:34:54.600000+00:00,real,BTC-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-09T15:34:54.603000+00:00,real,ETH-USDT-SWAP,buy,,1.0,depth_imbalance[notional],True,2849767898587385856,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2849767898587385856"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757432101643""}], ""inTime"": ""1757432101642508"", ""msg"": """", ""outTime"": ""1757432101644713""}"
+2025-09-09T15:35:49.300000+00:00,real,BTC-USDT-SWAP,sell,,1.0,risk_reject: 下单名义金额 111082.90 超过单次上限 50000.00,False,,-2,risk_block,{}
+2025-09-09T15:35:49.203000+00:00,real,ETH-USDT-SWAP,buy,,1.0,depth_imbalance[notional],False,,50110,Your IP 2a09:bac5:60e9:78::c:357 is not included in your API key's ea2f78de-a081-42d0-816c-06e98496ecdc IP whitelist.,"{""msg"": ""Your IP 2a09:bac5:60e9:78::c:357 is not included in your API key's ea2f78de-a081-42d0-816c-06e98496ecdc IP whitelist."", ""code"": ""50110""}"
