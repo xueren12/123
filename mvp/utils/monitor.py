@@ -18,7 +18,7 @@
 
 注意：
 - 价格来源：trades 表最新一条记录；盘口来源：orderbook 表最新一条记录
-- 策略信号：调用 strategies.depth_strategy.DepthImbalanceStrategy 的 compute_signal（DB 模式）
+- 策略信号：调用 strategies.ma_breakout.MABreakoutStrategy 的 compute_signal（DB 模式）
 - 如需 Web UI，可将 AppConfig.monitor.use_web_ui 置为 True，当前占位（后续可接 FastAPI + SSE）
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ from loguru import logger
 
 from utils.config import AppConfig
 from utils.db import TimescaleDB
-from strategies.depth_strategy import DepthImbalanceStrategy, StrategyConfig
+from strategies.ma_breakout import MABreakoutStrategy, MABreakoutConfig
 
 # 可选：Telegram/Slack SDK（按需导入，避免硬依赖）
 try:
@@ -74,8 +74,6 @@ class StratSig:
     inst: str
     ts: Optional[datetime]
     signal: str
-    buy_depth: Optional[float]
-    sell_depth: Optional[float]
 
 
 class Notifier:
@@ -127,7 +125,8 @@ class RealTimeMonitor:
         # 告警限频：记录同类 key 的上一次发送时间
         self._last_alert_time: Dict[str, float] = {}
         # 策略对象缓存（每个 inst 一个）
-        self._strategies: Dict[str, DepthImbalanceStrategy] = {}
+        # self._strategies: Dict[str, DepthImbalanceStrategy] = {}
+        self._ma_strategies: Dict[str, MABreakoutStrategy] = {}
 
     # ---------------------
     # DB 基础工具
@@ -205,39 +204,37 @@ class RealTimeMonitor:
         bid_px, bid_sz, ask_px, ask_sz, spread_bps = self._top_of_book(bids, asks)
         return TopBook(inst=inst, ts=ts, bid_px=bid_px, bid_sz=bid_sz, ask_px=ask_px, ask_sz=ask_sz, spread_bps=spread_bps)
 
-    def _get_strategy(self, inst: str) -> DepthImbalanceStrategy:
-        if inst not in self._strategies:
-            # 从环境变量读取策略参数，便于在不改代码的情况下调参与产出信号
-            source = os.getenv("STRAT_SOURCE", "db")
-            levels = int(os.getenv("STRAT_LEVELS", "5"))
-            mode = os.getenv("STRAT_MODE", "notional")
-            threshold = float(os.getenv("STRAT_THRESHOLD", "0.02"))
-            period_sec = float(os.getenv("STRAT_PERIOD_SEC", "1.0"))
-            lookback = int(os.getenv("STRAT_LOOKBACK_SEC", "3"))
-            mock_bias = float(os.getenv("STRAT_MOCK_IMBALANCE_BIAS", "0.0"))
-            sc = StrategyConfig(
-                source=source, inst_id=inst, levels=levels, mode=mode, threshold=threshold,
-                period_sec=period_sec, lookback_seconds=lookback, fallback_to_mock=False,
-                mock_imbalance_bias=mock_bias,
+    def _get_strategy(self, inst: str) -> MABreakoutStrategy:
+        if inst not in self._ma_strategies:
+            cfg = MABreakoutConfig(
+                inst_id=inst,
+                timeframe=os.getenv("MA_TIMEFRAME", "5min"),
+                fast_ma=int(os.getenv("MA_FAST", "10")),
+                slow_ma=int(os.getenv("MA_SLOW", "30")),
+                breakout_lookback=int(os.getenv("MA_BREAKOUT_N", "20")),
+                breakout_buffer_pct=float(os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
+                lookback_bars=int(os.getenv("MA_LOOKBACK_BARS", "300")),
+                prefer_trades_price=(os.getenv("MA_PREFER_TRADES", "1") == "1"),
+                poll_sec=float(os.getenv("MA_POLL_SEC", "60.0")),
+                order_type=os.getenv("MA_ORDER_TYPE", "market").lower(),
+                stop_loss_pct=(float(os.getenv("MA_STOP_LOSS_PCT", "0.005")) if os.getenv("MA_STOP_LOSS_PCT", "").strip() != "" else None),
             )
-            self._strategies[inst] = DepthImbalanceStrategy(sc)
-        return self._strategies[inst]
+            self._ma_strategies[inst] = MABreakoutStrategy(cfg)
+        return self._ma_strategies[inst]
 
     def _build_signal(self, inst: str) -> StratSig:
         try:
             sig = self._get_strategy(inst).compute_signal()
             if not sig:
-                return StratSig(inst=inst, ts=None, signal="NA", buy_depth=None, sell_depth=None)
+                return StratSig(inst=inst, ts=None, signal="NA")
             return StratSig(
                 inst=inst,
-                ts=sig["ts"],
-                signal=sig["signal"],
-                buy_depth=float(sig["buy_depth"]),
-                sell_depth=float(sig["sell_depth"]),
+                ts=sig.get("ts"),
+                signal=str(sig.get("signal", "NA")),
             )
         except Exception as e:
             logger.debug("策略信号获取失败：{}", e)
-            return StratSig(inst=inst, ts=None, signal="ERR", buy_depth=None, sell_depth=None)
+            return StratSig(inst=inst, ts=None, signal="ERR")
 
     # ---------------------
     # 告警逻辑

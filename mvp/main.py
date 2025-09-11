@@ -24,7 +24,7 @@ import os
 import signal
 import threading
 import time
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any
 
 from loguru import logger
 
@@ -32,7 +32,7 @@ from utils.config import AppConfig
 from utils.okx_ws_collector import OKXWSCollector
 from utils.monitor import RealTimeMonitor
 from utils.db import TimescaleDB
-from strategies.depth_strategy import DepthImbalanceStrategy, StrategyConfig
+from strategies.ma_breakout import MABreakoutStrategy, MABreakoutConfig
 from executor.trade_executor import TradeExecutor, TradeSignal
 from models.ai_advisor import AIAdvisor, build_payload
 
@@ -42,20 +42,32 @@ class SystemOrchestrator:
 
     def __init__(self, cfg: Optional[AppConfig] = None) -> None:
         self.cfg = cfg or AppConfig()
-        # 采集器（异步任务）
-        self.collector = OKXWSCollector(self.cfg)
-        self._collector_task: Optional[asyncio.Task] = None
-        # 策略对象缓存（每个交易对一个）
-        self._strategies: Dict[str, DepthImbalanceStrategy] = {}
+        self.db = TimescaleDB(self.cfg)
+        # 采集器开关：允许在本地离线冒烟时禁用 WS 采集器
+        self.collector_enabled = os.getenv("COLLECTOR_ENABLED", "1") == "1"
+        self.collector = OKXWSCollector(self.cfg) if self.collector_enabled else None
         # 执行器（根据配置模式初始化：mock/real/paused）
         self.executor = TradeExecutor(self.cfg, mode=self.cfg.exec.mode)
         # AI 模块（按需调用）
         self.ai = AIAdvisor(self.cfg)
+        # AI 门控与监控开关
         self.ai_gate_enabled = os.getenv("AI_GATE_ENABLED", "0") == "1"
-        # 监控模块（独立线程运行，阻塞性 while True 循环）
         self.monitor_enabled = os.getenv("MONITOR_ENABLED", "1") == "1"
+        # 监控模块（独立线程运行，阻塞性 while True 循环）
         self._monitor_thread: Optional[threading.Thread] = None
         self.monitor = RealTimeMonitor(self.cfg)
+        # 冷却时间：优先读取 MA_COOLDOWN_SEC，其次 COOLDOWN_SEC；默认 0=不启用
+        try:
+            self.cooldown_sec: float = float(os.getenv("MA_COOLDOWN_SEC", os.getenv("COOLDOWN_SEC", "0")))
+        except Exception:
+            self.cooldown_sec = 0.0
+        # 记录各标的最近一次下单时间戳（秒）
+        self._last_trade_ts: Dict[str, float] = {}
+        # 虚拟持仓：按策略目标持仓记录（BUY=+1，SELL=-1，HOLD=延续），仅用于日志观测
+        self._virt_pos: Dict[str, float] = {}
+        # 采集任务与策略缓存
+        self._collector_task: Optional[asyncio.Task] = None
+        self._strategies: Dict[str, Any] = {}
         # 杂项
         self.stop_event = threading.Event()
         self._db_for_ai = TimescaleDB()  # 仅用于查询最近价/前值给 AI 构造输入
@@ -92,8 +104,11 @@ class SystemOrchestrator:
         insts = [s.strip() for s in self.cfg.ws.instruments if s.strip()]
         logger.info("系统启动：标的={}, 执行模式={}, AI门控={}, 监控={}", insts, self.executor.mode, self.ai_gate_enabled, self.monitor_enabled)
 
-        # 1) 启动 OKX 采集器（异步任务）
-        self._collector_task = asyncio.create_task(self.collector.start(), name="okx_collector")
+        # 1) 启动 OKX 采集器（异步任务，可禁用）
+        if self.collector_enabled and self.collector is not None:
+            self._collector_task = asyncio.create_task(self.collector.start(), name="okx_collector")
+        else:
+            logger.info("已禁用 WS 采集器（COLLECTOR_ENABLED=0）")
 
         # 2) 启动监控（后台线程）
         if self.monitor_enabled:
@@ -133,45 +148,60 @@ class SystemOrchestrator:
         logger.success("系统已停止。")
 
     # ========== 策略循环 ==========
-    def _get_strategy(self, inst: str) -> DepthImbalanceStrategy:
+    def _get_strategy(self, inst: str) -> Any:
+        """仅保留均线+突破策略"""
         if inst not in self._strategies:
-            # 从环境变量读取策略参数，便于在不改代码的情况下调参与产出信号
-            source = os.getenv("STRAT_SOURCE", "db")
-            levels = int(os.getenv("STRAT_LEVELS", "5"))
-            mode = os.getenv("STRAT_MODE", "notional")
-            threshold = float(os.getenv("STRAT_THRESHOLD", "0.01"))
-            period_sec = float(os.getenv("STRAT_PERIOD_SEC", "1.0"))
-            lookback = int(os.getenv("STRAT_LOOKBACK_SEC", "3"))
-            mock_bias = float(os.getenv("STRAT_MOCK_IMBALANCE_BIAS", "0.0"))
-            sc = StrategyConfig(
-                source=source, inst_id=inst,
-                levels=levels, mode=mode, threshold=threshold, period_sec=period_sec,
-                lookback_seconds=lookback, fallback_to_mock=False,
+            cfg = MABreakoutConfig(
+                inst_id=inst,
+                timeframe=os.getenv("MA_TIMEFRAME", "5min"),
+                fast_ma=int(os.getenv("MA_FAST", "10")),
+                slow_ma=int(os.getenv("MA_SLOW", "30")),
+                breakout_lookback=int(os.getenv("MA_BREAKOUT_N", "20")),
+                breakout_buffer_pct=float(os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
+                lookback_bars=int(os.getenv("MA_LOOKBACK_BARS", "300")),
+                prefer_trades_price=(os.getenv("MA_PREFER_TRADES", "1") == "1"),
+                poll_sec=float(os.getenv("MA_POLL_SEC", "60.0")),
+                order_type=os.getenv("MA_ORDER_TYPE", "market").lower(),
+                stop_loss_pct=(float(os.getenv("MA_STOP_LOSS_PCT", "0.005")) if os.getenv("MA_STOP_LOSS_PCT", "").strip() != "" else None),
             )
-            # 若策略实现支持 mock 偏置，额外设置（保持向后兼容）
-            try:
-                setattr(sc, "mock_imbalance_bias", mock_bias)
-            except Exception:
-                pass
-            self._strategies[inst] = DepthImbalanceStrategy(sc)
+            self._strategies[inst] = MABreakoutStrategy(cfg)
         return self._strategies[inst]
 
     async def _strategy_loop(self, insts: List[str]) -> None:
-        """每秒运行策略，必要时触发下单与 AI 建议。"""
+        """按策略建议节奏运行，必要时触发下单与 AI 建议。"""
         trade_size = float(os.getenv("TRADE_SIZE", "0.001"))
-        poll_sec = 1.0
-        logger.info("策略循环启动：trade_size={} poll={}s", trade_size, poll_sec)
+        # 根据策略类型确定轮询周期（中低频策略建议使用分钟级节奏）
+        poll_sec = max(0.5, float(os.getenv("MA_POLL_SEC", "60.0")))
+        logger.info("策略循环启动：trade_size={} poll={}s type={} cooldown={}s", trade_size, poll_sec, "ma_breakout", self.cooldown_sec)
         try:
             while not self.stop_event.is_set():
                 loop_start = time.time()
                 for inst in insts:
                     try:
                         strat = self._get_strategy(inst)
-                        sig = strat.compute_signal()
+                        sig = getattr(strat, "compute_signal")()
                         if not sig:
+                            logger.debug("[策略] {} 暂无信号/数据不足", inst)
                             continue
-                        side = sig.get("signal")
+                        # 输出关键指标，便于观测（最近一根bar的 close/MA/高低点）
+                        try:
+                            logger.info(
+                                "[{}] sig={} close={:.6f} fast={:.6f} slow={:.6f} highN={:.6f} lowN={:.6f}",
+                                inst, sig.get("signal"), float(sig.get("close")), float(sig.get("fast")),
+                                float(sig.get("slow")), float(sig.get("brk_high")), float(sig.get("brk_low")),
+                            )
+                        except Exception:
+                            pass
+
+                        side = str(sig.get("signal", "")).upper()
                         if side in ("BUY", "SELL"):
+                            # 冷却判定：若设置了冷却且尚未到期则跳过
+                            if self.cooldown_sec > 0:
+                                last_ts = self._last_trade_ts.get(inst, 0.0)
+                                if (time.time() - last_ts) < self.cooldown_sec:
+                                    remain = max(0.0, self.cooldown_sec - (time.time() - last_ts))
+                                    logger.info("[冷却中] {} 信号={}，剩余 {:.1f}s 跳过下单", inst, side, remain)
+                                    continue
                             # 可选：调用 AI 建议作为门控
                             allow_trade = True
                             ai_advice_desc = None
@@ -196,16 +226,34 @@ class SystemOrchestrator:
                                 logger.warning("[AI门控拦截] {} 信号={} 被拦截。{}", inst, side, ai_advice_desc or "")
                                 continue
 
-                            # 生成交易信号并执行
+                            # 生成交易信号并执行（统一组装）
                             ts = sig.get("ts")
+                            ord_type = str(sig.get("ord_type", "market")).lower()
+                            meta = {"ordType": ord_type}
+                            # 透传策略建议止损价 -> 风控/执行可利用（slTriggerPx 或 slOrdPx）
+                            if sig.get("sl") is not None:
+                                try:
+                                    meta["slTriggerPx"] = float(sig.get("sl"))
+                                except Exception:
+                                    pass
+                            reason = sig.get("reason") or "ma_breakout"
+
                             trade_sig = TradeSignal(
                                 ts=ts, symbol=inst, side=side.lower(), price=None,
-                                size=trade_size, reason=f"depth_imbalance[{sig.get('mode')}]",
-                                meta={"ordType": "market"},
+                                size=trade_size, reason=reason,
+                                meta=meta,
                             )
                             res = self.executor.execute(trade_sig)
                             if res.ok:
                                 logger.success("[下单成功] {} {} size={} order_id={}", inst, side, trade_size, res.order_id)
+                                # 成功后记录冷却时间戳
+                                self._last_trade_ts[inst] = time.time()
+                                # 更新虚拟持仓并输出
+                                try:
+                                    self._virt_pos[inst] = 1.0 if side == "BUY" else -1.0
+                                    logger.info("[虚拟持仓] {} pos={}", inst, self._virt_pos[inst])
+                                except Exception:
+                                    pass
                             else:
                                 logger.error("[下单失败] {} {} size={} err={}", inst, side, trade_size, res.err)
                         else:

@@ -54,7 +54,7 @@ class BacktestConfig:
     end: str = "2024-09-01T06:00:00Z"         # 结束时间（包含端点的右侧可能根据采样方式而不同）
     timeframe: str = "1s"                     # 时间粒度："1s" 或 "1min" 等
 
-    # 策略相关（与 strategies.depth_strategy 的思想一致）
+    # 策略相关（示例参数，若采用 MA 突破策略可忽略此处或用于扩展）
     levels: int = 5
     mode: str = "notional"                    # "size" 或 "notional"
     threshold: float = 0.02                    # 相对不平衡阈值（例如 0.02 表示 2%）

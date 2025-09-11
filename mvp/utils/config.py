@@ -23,10 +23,10 @@ class WSConfig:
 @dataclass
 class DBEnvConfig:
     host: str = os.getenv("DB_HOST", "localhost")
-    port: int = int(os.getenv("DB_PORT", "5432"))
+    port: int = int(os.getenv("DB_PORT", "15432"))
     dbname: str = os.getenv("DB_NAME", "crypto")
     user: str = os.getenv("DB_USER", "postgres")
-    password: str = os.getenv("DB_PASSWORD", "postgres")
+    password: str = os.getenv("DB_PASSWORD", "123456")
     sslmode: str = os.getenv("DB_SSLMODE", "prefer")
 
 

@@ -133,13 +133,10 @@ class RiskManager:
             return RiskCheckResult(False, ["参考价格缺失或非法"], 0.0, 0.0, 0.0)
         notional_usd = max(0.0, order.qty) * ref_price
 
-        # 2) 单次下单最大比例（占用权益）
+        # 2) 单次下单最大比例（占用权益）—按需关闭拦截（不再作为拦截条件）
         if account.equity_usd <= 0:
             violations.append("账户权益为0或未知，拒绝下单")
-        else:
-            if notional_usd > account.equity_usd * self.cfg.single_order_max_pct_equity + 1e-9:
-                violations.append(
-                    f"下单名义金额 {notional_usd:.2f} 超过单次上限 {account.equity_usd * self.cfg.single_order_max_pct_equity:.2f}")
+        # else: 不拦截“下单名义金额超限”，仅作为可选信息（已取消硬性约束）
 
         # 3) 仓位上限（名义 USD）
         cur_pos = abs(account.position_usd_by_instrument.get(order.inst_id, 0.0))
@@ -153,15 +150,8 @@ class RiskManager:
             violations.append(
                 f"当前未完成订单数 {cur_open} 超过上限 {self.cfg.max_open_orders}（本次下单将达到 {cur_open + 1}）")
 
-        # 5) 滑点上限
-        slip_pct = self._estimate_slippage_pct(order, ref_price, market)
-        if slip_pct is None:
-            violations.append("无法估算滑点：缺少价格信息")
-            slip_pct = 0.0
-        else:
-            if slip_pct > self.cfg.max_slippage_pct + 1e-12:
-                violations.append(
-                    f"预估滑点 {slip_pct:.5f} 超过上限 {self.cfg.max_slippage_pct:.5f}")
+        # 5) 滑点约束功能已移除，不再作为拦截条件
+        slip_pct = 0.0  # 可选：保留为0，供上层记录
 
         # 6) 单笔最大亏损
         potential_loss = self._estimate_single_trade_loss_usd(order, ref_price, notional_usd)

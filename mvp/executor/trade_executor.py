@@ -302,6 +302,26 @@ class CircuitBreaker:
                 return float(df.iloc[-1]["price"])
         except Exception as e:
             logger.debug("查询最近成交价失败：{}", e)
+        # 回退：若数据库无价，尝试使用 REST 行情（ticker -> last/bid/ask；再退到 mark）
+        try:
+            if self.client is None and self._effective_mode() == "real":
+                # 确保在 real 模式有 REST 客户端（即便只是公共行情也可复用同一个客户端）
+                self.client = OKXRESTClient(self.cfg)
+            if self.client is not None:
+                r1 = self.client.get_ticker(inst_id)
+                if r1.ok and isinstance(r1.data, list) and len(r1.data) > 0:
+                    d = r1.data[0]
+                    last = d.get("last") or d.get("lastPx")
+                    if last is not None:
+                        return float(last)
+                r2 = self.client.get_mark_price(inst_id)
+                if r2.ok and isinstance(r2.data, list) and len(r2.data) > 0:
+                    d = r2.data[0]
+                    mark = d.get("markPx")
+                    if mark is not None:
+                        return float(mark)
+        except Exception as e:
+            logger.debug("REST 回退获取价格失败：{}", e)
         return None
 
 
@@ -424,6 +444,23 @@ class TradeExecutor:
     def _default_market_state(self, inst_id: str, ref_price: Optional[float]) -> MarketState:
         mid = self.guard.get_last_price(inst_id) or ref_price
         if mid is None:
+            # 再尝试直接从 REST 获取 bid/ask 构造 mid
+            try:
+                if self.client is None and self._effective_mode() == "real":
+                    self.client = OKXRESTClient(self.cfg)
+                if self.client is not None:
+                    r = self.client.get_ticker(inst_id)
+                    if r.ok and isinstance(r.data, list) and len(r.data) > 0:
+                        d = r.data[0]
+                        bid = d.get("bidPx")
+                        ask = d.get("askPx")
+                        if bid and ask:
+                            bid_f = float(bid)
+                            ask_f = float(ask)
+                            mid_tmp = (bid_f + ask_f) / 2
+                            return MarketState(mid_price=mid_tmp, best_bid=bid_f, best_ask=ask_f)
+            except Exception as e:
+                logger.debug("REST 回退获取市场状态失败：{}", e)
             return MarketState(mid_price=None)
         
         # 为市价单提供合理的bid/ask估算，假设0.01%的价差

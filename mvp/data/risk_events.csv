@@ -1,4 +1,0 @@
-ts,event_type,mode_before,mode_after,reason,details,day_pnl_usd,threshold_usd
-2025-09-09T13:08:23.830060+00:00,manual_switch,mock,paused,control_file,{},0.0000,0.0000
-2025-09-09T15:18:16.939986+00:00,manual_switch,real,mock,control_file,{},0.0000,0.0000
-2025-09-09T15:19:14.259769+00:00,manual_switch,mock,real,control_file,{},0.0000,0.0000

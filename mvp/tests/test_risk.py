@@ -40,7 +40,7 @@ def test_risk_basic_rules(app_cfg: AppConfig):
         equity_usd=1000,
         position_usd_by_instrument={"BTC-USDT": 900},
         open_orders_count_by_instrument={"BTC-USDT": 1},
-        daily_realized_pnl_usd=-80,
+        daily_realized_pnl_usd=-99,  # 调整为-99，使潜在亏损与已亏之和超过上限，触发“日亏超限”提示
     )
     market = MarketState(mid_price=60000, best_bid=59990, best_ask=60010)
 

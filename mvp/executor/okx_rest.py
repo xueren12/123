@@ -217,6 +217,19 @@ class OKXRESTClient:
             params["clOrdId"] = cl_ord_id
         return self._request("GET", path, params=params)
 
+    # =============== 行情接口（公共） ===============
+    def get_ticker(self, inst_id: str) -> OKXResponse:
+        """最新行情：/api/v5/market/ticker?instId=... 返回 last/bidPx/askPx 等"""
+        path = "/api/v5/market/ticker"
+        params: Dict[str, Any] = {"instId": inst_id}
+        return self._request("GET", path, params=params)
+
+    def get_mark_price(self, inst_id: str) -> OKXResponse:
+        """标记价格：/api/v5/public/mark-price?instId=..."""
+        path = "/api/v5/public/mark-price"
+        params: Dict[str, Any] = {"instId": inst_id}
+        return self._request("GET", path, params=params)
+
     def close(self) -> None:
         try:
             self._client.close()
