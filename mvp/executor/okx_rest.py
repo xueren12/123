@@ -131,6 +131,24 @@ class OKXRESTClient:
         ok = (payload.get("code") == "0")
         return OKXResponse(ok=ok, code=str(payload.get("code")), msg=str(payload.get("msg")), data=payload.get("data"), raw=payload)
 
+    # 新增：公共 GET 请求（无需签名/鉴权），用于 market/public 端点
+    def _request_public(self, method: str, path: str, params: Optional[Dict[str, Any]] = None) -> OKXResponse:
+        """公共行情请求：不带任何鉴权头，适用于 /api/v5/market/* 与 /api/v5/public/*。
+        这样即便在 mock/paused 模式且未配置密钥，也能拿到参考价。
+        """
+        assert method.upper() == "GET", "公共接口目前仅支持 GET"
+        try:
+            r = self._client.get(path, params=params)
+        except httpx.RequestError as e:
+            logger.error("HTTP 公共请求异常: {}", e)
+            return OKXResponse(ok=False, code="-1", msg=str(e), data=None, raw={})
+        try:
+            payload = r.json()
+        except Exception:
+            return OKXResponse(ok=False, code=str(r.status_code), msg=r.text[:500], data=None, raw={})
+        ok = (payload.get("code") == "0")
+        return OKXResponse(ok=ok, code=str(payload.get("code")), msg=str(payload.get("msg")), data=payload.get("data"), raw=payload)
+
     # --------------------
     # 交易接口：下单/撤单/查单
     # --------------------
@@ -169,42 +187,33 @@ class OKXRESTClient:
             "sz": str(sz),
             "tdMode": resolved_td_mode,
         }
-        # 仅在现货模式（cash）时设置 tgtCcy，合约/杠杆不需要该字段
-        if resolved_td_mode == "cash":
+        # 限价单需要传 px
+        if ord_type == "limit" and px is not None:
+            body["px"] = px
+        # 仅现货买入：可选设置以 quote 计价
+        if ord_type == "market" and side == "buy" and (tgt_ccy or self.cfg.okx.tgt_ccy):
             body["tgtCcy"] = tgt_ccy or self.cfg.okx.tgt_ccy
-        if px is not None:
-            body["px"] = str(px)
-        if cl_ord_id:
-            body["clOrdId"] = cl_ord_id
-
+        # 用户自定义 tdMode 覆盖
+        if td_mode is not None:
+            body["tdMode"] = td_mode
         # 止盈止损
         if tp_trigger_px is not None:
-            body["tpTriggerPx"] = str(tp_trigger_px)
+            body["tpTriggerPx"] = tp_trigger_px
         if tp_ord_px is not None:
-            body["tpOrdPx"] = str(tp_ord_px)
+            body["tpOrdPx"] = tp_ord_px
         if sl_trigger_px is not None:
-            body["slTriggerPx"] = str(sl_trigger_px)
+            body["slTriggerPx"] = sl_trigger_px
         if sl_ord_px is not None:
-            body["slOrdPx"] = str(sl_ord_px)
+            body["slOrdPx"] = sl_ord_px
         if tp_trigger_px_type is not None:
             body["tpTriggerPxType"] = tp_trigger_px_type
         if sl_trigger_px_type is not None:
             body["slTriggerPxType"] = sl_trigger_px_type
-
-        # 透传额外参数（用于合约场景：posSide、reduceOnly、lever、tag 等）
+        if cl_ord_id is not None:
+            body["clOrdId"] = cl_ord_id
         if extra:
             body.update(extra)
 
-        return self._request("POST", path, body=body)
-
-    def cancel_order(self, inst_id: str, ord_id: Optional[str] = None, cl_ord_id: Optional[str] = None) -> OKXResponse:
-        """撤单：/api/v5/trade/cancel-order（ordId 与 clOrdId 二选一）"""
-        path = "/api/v5/trade/cancel-order"
-        body: Dict[str, Any] = {"instId": inst_id}
-        if ord_id:
-            body["ordId"] = ord_id
-        if cl_ord_id:
-            body["clOrdId"] = cl_ord_id
         return self._request("POST", path, body=body)
 
     def get_order(self, inst_id: str, ord_id: Optional[str] = None, cl_ord_id: Optional[str] = None) -> OKXResponse:
@@ -219,15 +228,24 @@ class OKXRESTClient:
 
     # =============== 行情接口（公共） ===============
     def get_ticker(self, inst_id: str) -> OKXResponse:
-        """最新行情：/api/v5/market/ticker?instId=... 返回 last/bidPx/askPx 等"""
+        """最新行情：/api/v5/market/ticker?instId=... 返回 last/bidPx/askPx 等
+        - 若未配置 API Key，则自动走公共请求（无签名），用于在非实盘模式下获取参考价。
+        """
         path = "/api/v5/market/ticker"
         params: Dict[str, Any] = {"instId": inst_id}
+        # 若缺少密钥/密文/口令，则使用公共请求以避免签名失败
+        if not self.api_key or not self.secret_key or not self.passphrase:
+            return self._request_public("GET", path, params=params)
         return self._request("GET", path, params=params)
 
     def get_mark_price(self, inst_id: str) -> OKXResponse:
-        """标记价格：/api/v5/public/mark-price?instId=..."""
+        """标记价格：/api/v5/public/mark-price?instId=...
+        - 若未配置 API Key，则自动走公共请求（无签名）。
+        """
         path = "/api/v5/public/mark-price"
         params: Dict[str, Any] = {"instId": inst_id}
+        if not self.api_key or not self.secret_key or not self.passphrase:
+            return self._request_public("GET", path, params=params)
         return self._request("GET", path, params=params)
 
     def close(self) -> None:

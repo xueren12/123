@@ -304,8 +304,9 @@ class CircuitBreaker:
             logger.debug("查询最近成交价失败：{}", e)
         # 回退：若数据库无价，尝试使用 REST 行情（ticker -> last/bid/ask；再退到 mark）
         try:
-            if self.client is None and self._effective_mode() == "real":
-                # 确保在 real 模式有 REST 客户端（即便只是公共行情也可复用同一个客户端）
+            # 修改：无论是否 real 模式，均允许初始化 REST 客户端用以访问公共行情接口
+            # 说明：公共行情不需要鉴权，OKXRESTClient 内部会在未配置密钥时自动使用无签名请求
+            if self.client is None:
                 self.client = OKXRESTClient(self.cfg)
             if self.client is not None:
                 r1 = self.client.get_ticker(inst_id)
@@ -446,7 +447,8 @@ class TradeExecutor:
         if mid is None:
             # 再尝试直接从 REST 获取 bid/ask 构造 mid
             try:
-                if self.client is None and self._effective_mode() == "real":
+                # 修改：无论当前模式是否 real，均初始化 REST 客户端以访问公共行情
+                if self.client is None:
                     self.client = OKXRESTClient(self.cfg)
                 if self.client is not None:
                     r = self.client.get_ticker(inst_id)
