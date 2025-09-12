@@ -685,6 +685,24 @@ class TradeExecutor:
 
         # 止盈止损参数透传
         meta = signal.meta or {}
+        # 规范化止损参数：若仅提供触发价则默认以市价委托执行止损（slOrdPx=-1），并设置默认触发价类型为 last，避免与交易所规则不匹配
+        try:
+            if meta.get("slTriggerPx") is not None:
+                # 触发价转为字符串（数值安全）
+                try:
+                    meta["slTriggerPx"] = str(float(meta.get("slTriggerPx")))
+                except Exception:
+                    meta["slTriggerPx"] = str(meta.get("slTriggerPx"))
+                # 未提供 slOrdPx 时，强制使用市价止损
+                if not meta.get("slOrdPx"):
+                    meta["slOrdPx"] = "-1"
+                else:
+                    meta["slOrdPx"] = str(meta.get("slOrdPx"))
+                # 默认触发价类型
+                if not meta.get("slTriggerPxType"):
+                    meta["slTriggerPxType"] = "last"
+        except Exception:
+            pass
         resp: OKXResponse = self.client.place_order(
             inst_id=signal.symbol,
             side=side,

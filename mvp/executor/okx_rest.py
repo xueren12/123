@@ -52,9 +52,14 @@ class OKXRESTClient:
     def __init__(self, cfg: AppConfig, timeout: float = 10.0) -> None:
         self.cfg = cfg
         self.base_url = cfg.okx.base_url.rstrip("/")
-        self.api_key = cfg.okx.api_key
-        self.secret_key = cfg.okx.secret_key
-        self.passphrase = cfg.okx.passphrase
+        # 注：显式 strip 并校验 ASCII，避免 httpx 组包时因非 ASCII 报错
+        self.api_key = (cfg.okx.api_key or "").strip()
+        self.secret_key = (cfg.okx.secret_key or "").strip()
+        self.passphrase = (cfg.okx.passphrase or "").strip()
+        # 简单 ASCII 校验（不要在此打印任何密钥内容）
+        for name, v in (("OKX_API_KEY", self.api_key), ("OKX_API_SECRET", self.secret_key), ("OKX_API_PASSPHRASE", self.passphrase)):
+            if v and not v.isascii():
+                raise ValueError(f"{name} 包含非ASCII字符，请检查 .env 是否含中文引号/全角字符/不可见字符并移除")
         self.simulated = cfg.okx.simulated_trading
         self.timeout = timeout
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
@@ -190,25 +195,34 @@ class OKXRESTClient:
         # 限价单需要传 px
         if ord_type == "limit" and px is not None:
             body["px"] = px
-        # 仅现货买入：可选设置以 quote 计价
-        if ord_type == "market" and side == "buy" and (tgt_ccy or self.cfg.okx.tgt_ccy):
-            body["tgtCcy"] = tgt_ccy or self.cfg.okx.tgt_ccy
+        # 仅现货买入：可选设置以 quote 计价（合约/Futures/Swap/Option 不支持 tgtCcy）
+        if ord_type == "market" and side == "buy":
+            # OKX 现货 instId 形如 BTC-USDT（两段），合约形如 BTC-USDT-SWAP / BTC-USDT-240927（>= 三段）
+            is_spot = len(inst_id.split("-")) == 2
+            if is_spot:
+                chosen_tgt_ccy = tgt_ccy or self.cfg.okx.tgt_ccy
+                if chosen_tgt_ccy:
+                    body["tgtCcy"] = chosen_tgt_ccy
         # 用户自定义 tdMode 覆盖
         if td_mode is not None:
             body["tdMode"] = td_mode
-        # 止盈止损
+        # 止盈止损：按交易所要求使用 attachAlgoOrds 数组（不再在顶层直接放置 tp/sl 字段）
+        attach: Dict[str, Any] = {}
         if tp_trigger_px is not None:
-            body["tpTriggerPx"] = tp_trigger_px
+            attach["tpTriggerPx"] = tp_trigger_px
         if tp_ord_px is not None:
-            body["tpOrdPx"] = tp_ord_px
+            attach["tpOrdPx"] = tp_ord_px
         if sl_trigger_px is not None:
-            body["slTriggerPx"] = sl_trigger_px
+            attach["slTriggerPx"] = sl_trigger_px
         if sl_ord_px is not None:
-            body["slOrdPx"] = sl_ord_px
+            attach["slOrdPx"] = sl_ord_px
         if tp_trigger_px_type is not None:
-            body["tpTriggerPxType"] = tp_trigger_px_type
+            attach["tpTriggerPxType"] = tp_trigger_px_type
         if sl_trigger_px_type is not None:
-            body["slTriggerPxType"] = sl_trigger_px_type
+            attach["slTriggerPxType"] = sl_trigger_px_type
+        if attach:
+            body["attachAlgoOrds"] = [attach]
+        # 客户端订单ID
         if cl_ord_id is not None:
             body["clOrdId"] = cl_ord_id
         if extra:
