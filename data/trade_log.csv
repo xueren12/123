@@ -1,1 +1,6 @@
-2025-09-12T08:46:00+00:00,real,ETH-USDT-SWAP,sell,,1.0,ma_breakout,True,2857643790806339584,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2857643790806339584"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757666821522""}], ""inTime"": ""1757666821521816"", ""msg"": """", ""outTime"": ""1757666821524378""}"
+2025-09-14T13:41:00+00:00,real,ETH-USDT-SWAP,buy,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-14T13:44:00+00:00,real,ETH-USDT-SWAP,sell,,1.0,ma_breakout,False,,1,All operations failed,"{""code"": ""1"", ""data"": [{""clOrdId"": """", ""ordId"": """", ""sCode"": ""51053"", ""sMsg"": ""Your SL price should be higher than the primary order price."", ""tag"": """", ""ts"": ""1757857501718""}], ""inTime"": ""1757857501718134"", ""msg"": ""All operations failed"", ""outTime"": ""1757857501718367""}"
+2025-09-14T13:51:00+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-14T13:51:00+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-14T13:51:00+00:00,real,ETH-USDT-SWAP,sell,,1.0,risk_reject: 参考价格缺失或非法,False,,-2,risk_block,{}
+2025-09-14T13:52:00+00:00,real,ETH-USDT-SWAP,buy,,1.0,ma_breakout,True,2864056884608684032,0,,"{""code"": ""0"", ""data"": [{""clOrdId"": """", ""ordId"": ""2864056884608684032"", ""sCode"": ""0"", ""sMsg"": ""Order placed"", ""tag"": """", ""ts"": ""1757857946611""}], ""inTime"": ""1757857946610903"", ""msg"": """", ""outTime"": ""1757857946613422""}"

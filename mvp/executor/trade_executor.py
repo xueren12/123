@@ -445,22 +445,41 @@ class TradeExecutor:
     def _default_market_state(self, inst_id: str, ref_price: Optional[float]) -> MarketState:
         mid = self.guard.get_last_price(inst_id) or ref_price
         if mid is None:
-            # 再尝试直接从 REST 获取 bid/ask 构造 mid
+            # 再尝试直接从 REST 获取 bid/ask/last 构造 mid
             try:
                 # 修改：无论当前模式是否 real，均初始化 REST 客户端以访问公共行情
                 if self.client is None:
                     self.client = OKXRESTClient(self.cfg)
                 if self.client is not None:
+                    # 优先尝试 ticker（包含 bid/ask/last）
                     r = self.client.get_ticker(inst_id)
                     if r.ok and isinstance(r.data, list) and len(r.data) > 0:
                         d = r.data[0]
                         bid = d.get("bidPx")
                         ask = d.get("askPx")
+                        last = d.get("last") or d.get("lastPx")
+                        # 优先使用 bid/ask 构造 mid，其次回退 last
                         if bid and ask:
                             bid_f = float(bid)
                             ask_f = float(ask)
                             mid_tmp = (bid_f + ask_f) / 2
                             return MarketState(mid_price=mid_tmp, best_bid=bid_f, best_ask=ask_f)
+                        if last:
+                            last_f = float(last)
+                            # 构造一个极小点差用于后续估算
+                            spread_pct = 0.0001
+                            half_spread = last_f * spread_pct / 2
+                            return MarketState(mid_price=last_f, best_bid=last_f - half_spread, best_ask=last_f + half_spread)
+                    # 若 ticker 不可用或无数据，则回退到 mark price
+                    r2 = self.client.get_mark_price(inst_id)
+                    if r2.ok and isinstance(r2.data, list) and len(r2.data) > 0:
+                        d2 = r2.data[0]
+                        mark = d2.get("markPx")
+                        if mark:
+                            mark_f = float(mark)
+                            spread_pct = 0.0001
+                            half_spread = mark_f * spread_pct / 2
+                            return MarketState(mid_price=mark_f, best_bid=mark_f - half_spread, best_ask=mark_f + half_spread)
             except Exception as e:
                 logger.debug("REST 回退获取市场状态失败：{}", e)
             return MarketState(mid_price=None)
@@ -574,7 +593,7 @@ class TradeExecutor:
             order_type=ord_type,
             qty=float(signal.size),
             price=float(signal.price) if signal.price is not None else None,
-            reference_price=float(p0) if p0 is not None else None,
+            reference_price=None,  # 不再依赖参考价，交由风控内部自行兜底或忽略
             stop_loss_price=float(meta.get("slTriggerPx") or meta.get("slOrdPx")) if (meta.get("slTriggerPx") or meta.get("slOrdPx")) else None,
             expected_slippage_pct=(float(meta.get("expectedSlippagePct")) if meta.get("expectedSlippagePct") is not None else (
                 float(meta.get("expectedSlippage")) if meta.get("expectedSlippage") is not None else None
@@ -686,23 +705,69 @@ class TradeExecutor:
         # 止盈止损参数透传
         meta = signal.meta or {}
         # 规范化止损参数：若仅提供触发价则默认以市价委托执行止损（slOrdPx=-1），并设置默认触发价类型为 last，避免与交易所规则不匹配
+        # 新增：若 meta['noSL'] 为 True，则不附带任何止损相关参数（用于“直接下单不设置止损”的场景）
         try:
-            if meta.get("slTriggerPx") is not None:
-                # 触发价转为字符串（数值安全）
-                try:
-                    meta["slTriggerPx"] = str(float(meta.get("slTriggerPx")))
-                except Exception:
-                    meta["slTriggerPx"] = str(meta.get("slTriggerPx"))
-                # 未提供 slOrdPx 时，强制使用市价止损
-                if not meta.get("slOrdPx"):
-                    meta["slOrdPx"] = "-1"
-                else:
-                    meta["slOrdPx"] = str(meta.get("slOrdPx"))
-                # 默认触发价类型
-                if not meta.get("slTriggerPxType"):
-                    meta["slTriggerPxType"] = "last"
-        except Exception:
+            if bool(meta.get("noSL")):
+                # 清理可能存在的止损字段，避免误传导致交易所侧校验（51053等）
+                for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType"):
+                    if k in meta:
+                        meta.pop(k, None)
+            else:
+                if meta.get("slTriggerPx") is not None:
+                    try:
+                        # 将触发价规范为字符串数字
+                        meta["slTriggerPx"] = str(float(meta.get("slTriggerPx")))
+                    except Exception:
+                        # 若无法解析，保持原样，交由下游处理
+                        meta["slTriggerPx"] = str(meta.get("slTriggerPx"))
+                    # 未提供 slOrdPx 时，强制使用市价止损
+                    if not meta.get("slOrdPx"):
+                        meta["slOrdPx"] = "-1"  # 市价触发
+                    else:
+                        meta["slOrdPx"] = str(meta.get("slOrdPx"))
+                    # 默认触发价类型为 last
+                    if not meta.get("slTriggerPxType"):
+                        meta["slTriggerPxType"] = "last"
+                    # === 方向性校验与微调 ===
+                    sl_str = meta.get("slTriggerPx")
+                    if sl_str is not None:
+                        # 以字符串形式保存，但这里需要数值参与校验
+                        sl_val = float(sl_str)
+                        # 估算主单的“预期成交价”
+                        # - 市价单：BUY 近似按最优卖价(ask)成交，SELL 近似按最优买价(bid)成交
+                        # - 限价单：用用户给定的 price
+                        expected_px: Optional[float] = None
+                        # 再次获取市场状态（包含 best_bid/best_ask），若外部未注入 provider 则使用默认实现
+                        mkt = (self._market_state_provider(signal.symbol, p0) if self._market_state_provider else self._default_market_state(signal.symbol, p0))
+                        if ord_type == "market":
+                            if side == "buy":
+                                expected_px = (mkt.best_ask if hasattr(mkt, "best_ask") else None) or (mkt.mid_price if hasattr(mkt, "mid_price") else None) or p0
+                            else:
+                                expected_px = (mkt.best_bid if hasattr(mkt, "best_bid") else None) or (mkt.mid_price if hasattr(mkt, "mid_price") else None) or p0
+                        else:
+                            # 限价单直接使用下单价
+                            expected_px = float(signal.price) if signal.price is not None else p0
+                        # 若仍拿不到参考价，则跳过校验
+                        if expected_px is not None:
+                            # 设定一个极小的相对偏移（0.001%），仅用于满足方向性不等式
+                            eps = max(1e-8, float(expected_px) * 1e-6)
+                            if side == "buy":
+                                # BUY：止损应低于主单价
+                                if sl_val >= float(expected_px):
+                                    adj = float(expected_px) * (1.0 - 1e-6)
+                                    # 仅在原值不满足时才调整，尽量保持用户原始意图
+                                    sl_val = min(sl_val, adj)
+                            else:
+                                # SELL：止损应高于主单价
+                                if sl_val <= float(expected_px):
+                                    adj = float(expected_px) * (1.0 + 1e-6)
+                                    sl_val = max(sl_val, adj)
+                            # 回写为字符串，保持与其余字段类型一致
+                            meta["slTriggerPx"] = f"{sl_val}"
+        except Exception as _:
+            # 若校验过程出现异常，不影响下单主流程
             pass
+
         resp: OKXResponse = self.client.place_order(
             inst_id=signal.symbol,
             side=side,

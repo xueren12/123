@@ -19,6 +19,15 @@
 - 市价单买入默认以 base 计价（tgtCcy=base_ccy），对应 OKX 参数 sz=base 数量。
 """
 from __future__ import annotations
+
+# ==== 兼容从任意目录运行脚本：将 mvp 目录加入 sys.path，确保 `from utils ...` 可以导入 ====
+import sys
+from pathlib import Path
+_CUR = Path(__file__).resolve()
+_MVP_ROOT = _CUR.parent.parent  # 指向 mvp 目录
+if str(_MVP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MVP_ROOT))  # 将 mvp 目录放到搜索路径最前，确保 `utils` 可解析
+
 import os
 from datetime import datetime, timezone
 from loguru import logger
@@ -54,6 +63,10 @@ def main() -> None:
 
     # 构造市价信号（base 计量），现货 tdMode 使用 .env 或默认 cash
     td_mode = os.getenv("TEST_TD_MODE", cfg.okx.td_mode or "cash")
+    meta = {"ordType": "market", "tdMode": td_mode}
+    # 若设置 DISABLE_SL=1，则不附带任何止损参数
+    if str(os.getenv("DISABLE_SL", "0")).strip() == "1":
+        meta["noSL"] = True
     sig = TradeSignal(
         ts=datetime.now(timezone.utc),
         symbol=inst,
@@ -61,7 +74,7 @@ def main() -> None:
         price=None,
         size=size,
         reason="send_test_order",
-        meta={"ordType": "market", "tdMode": td_mode}
+        meta=meta
     )
 
     logger.info("发送测试单: inst={} side={} size={} tdMode={} ref_px={}", inst, side, size, td_mode, ref_px)

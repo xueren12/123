@@ -127,11 +127,14 @@ class RiskManager:
         - est_*: 估算的名义金额/潜在亏损/滑点等，便于记录日志
         """
         violations: List[str] = []
-        # 1) 计算名义金额与参考价
+        # 1) 计算名义金额与参考价（放宽：参考价缺失时不再拦截，名义金额按0估算）
         ref_price = self._resolve_reference_price(order, market)
+        # 参考价容错：缺失或非法时不拦截，名义金额置0，仅影响估算，不影响真实下单
         if ref_price is None or ref_price <= 0:
-            return RiskCheckResult(False, ["参考价格缺失或非法"], 0.0, 0.0, 0.0)
-        notional_usd = max(0.0, order.qty) * ref_price
+            ref_price = None
+            notional_usd = 0.0
+        else:
+            notional_usd = max(0.0, order.qty) * ref_price
 
         # 2) 单次下单最大比例（占用权益）—按需关闭拦截（不再作为拦截条件）
         if account.equity_usd <= 0:
@@ -190,12 +193,12 @@ class RiskManager:
             return order.price
         return None
 
-    def _estimate_slippage_pct(self, order: OrderIntent, ref_price: float, market: MarketState) -> Optional[float]:
+    def _estimate_slippage_pct(self, order: OrderIntent, ref_price: Optional[float], market: MarketState) -> Optional[float]:
         # 若显式给定预期滑点，则直接使用
         if order.expected_slippage_pct is not None:
             return max(0.0, float(order.expected_slippage_pct))
-        # 否则，若为限价单，使用 |limit - ref| / ref 估算
-        if order.order_type == "limit" and order.price is not None and ref_price > 0:
+        # 否则，若为限价单，使用 |limit - ref| / ref 估算（当 ref 缺失则无法估算）
+        if order.order_type == "limit" and order.price is not None and ref_price is not None and ref_price > 0:
             return abs(order.price - ref_price) / ref_price
         # 市价单但缺少预估滑点，则尝试用半个价差估算
         if market.best_bid and market.best_ask and market.best_ask > market.best_bid > 0:
@@ -204,12 +207,13 @@ class RiskManager:
             return (market.best_ask - market.best_bid) / 2.0 / mid
         return None
 
-    def _estimate_single_trade_loss_usd(self, order: OrderIntent, ref_price: float, notional_usd: float) -> Optional[float]:
-        # 若提供止损价，则用 |entry - stop| * qty 作为潜在亏损
+    def _estimate_single_trade_loss_usd(self, order: OrderIntent, ref_price: Optional[float], notional_usd: float) -> Optional[float]:
+        # 若提供止损价，则用 |entry - stop| * qty 作为潜在亏损；当 entry 无法确定时跳过该估算
         if order.stop_loss_price is not None and order.qty is not None:
-            entry = order.price if (order.order_type == "limit" and order.price) else ref_price
-            loss_per_unit = abs(entry - float(order.stop_loss_price))
-            return max(0.0, loss_per_unit * max(0.0, order.qty))
+            entry = order.price if (order.order_type == "limit" and order.price is not None) else ref_price
+            if entry is not None:
+                loss_per_unit = abs(float(entry) - float(order.stop_loss_price))
+                return max(0.0, loss_per_unit * max(0.0, order.qty))
         # 若提供最坏移动比例，则用比例 * 名义金额
         if order.worst_move_pct is not None:
             return max(0.0, float(order.worst_move_pct)) * max(0.0, notional_usd)

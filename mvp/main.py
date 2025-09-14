@@ -230,12 +230,17 @@ class SystemOrchestrator:
                             ts = sig.get("ts")
                             ord_type = str(sig.get("ord_type", "market")).lower()
                             meta = {"ordType": ord_type}
+                            # 止损开关：若设置了环境变量 DISABLE_SL=1，则不附带止损参数
+                            disable_sl = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
                             # 透传策略建议止损价 -> 风控/执行可利用（slTriggerPx 或 slOrdPx）
-                            if sig.get("sl") is not None:
+                            if (not disable_sl) and (sig.get("sl") is not None):
                                 try:
                                     meta["slTriggerPx"] = float(sig.get("sl"))
                                 except Exception:
                                     pass
+                            if disable_sl:
+                                # 提示执行器忽略任何止损逻辑（如支持）
+                                meta["noSL"] = True
                             reason = sig.get("reason") or "ma_breakout"
 
                             trade_sig = TradeSignal(
