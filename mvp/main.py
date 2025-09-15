@@ -163,6 +163,19 @@ class SystemOrchestrator:
                 poll_sec=float(os.getenv("MA_POLL_SEC", "60.0")),
                 order_type=os.getenv("MA_ORDER_TYPE", "market").lower(),
                 stop_loss_pct=(float(os.getenv("MA_STOP_LOSS_PCT", "0.005")) if os.getenv("MA_STOP_LOSS_PCT", "").strip() != "" else None),
+                # —— 新增：多指标参数（可通过环境变量覆盖）——
+                macd_fast=int(os.getenv("MA_MACD_FAST", os.getenv("MA_FAST", "12"))),   # 若未设置则回退到 MA_FAST 或默认 12
+                macd_slow=int(os.getenv("MA_MACD_SLOW", os.getenv("MA_SLOW", "26"))),   # 若未设置则回退到 MA_SLOW 或默认 26
+                macd_signal=int(os.getenv("MA_MACD_SIGNAL", "9")),
+                bb_period=int(os.getenv("MA_BB_PERIOD", os.getenv("MA_BREAKOUT_N", "20"))),
+                bb_k=float(os.getenv("MA_BB_K", "2.0")),
+                rsi_period=int(os.getenv("MA_RSI_PERIOD", "14")),
+                rsi_buy=float(os.getenv("MA_RSI_BUY", "55")),
+                rsi_sell=float(os.getenv("MA_RSI_SELL", "45")),
+                aroon_period=int(os.getenv("MA_AROON_PERIOD", "25")),
+                aroon_buy=float(os.getenv("MA_AROON_BUY", "70")),
+                aroon_sell=float(os.getenv("MA_AROON_SELL", "30")),
+                confirm_min=int(os.getenv("MA_CONFIRM_MIN", "3")),
             )
             self._strategies[inst] = MABreakoutStrategy(cfg)
         return self._strategies[inst]

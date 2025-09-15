@@ -18,7 +18,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 import httpx
 from loguru import logger
@@ -261,6 +261,81 @@ class OKXRESTClient:
         if not self.api_key or not self.secret_key or not self.passphrase:
             return self._request_public("GET", path, params=params)
         return self._request("GET", path, params=params)
+
+    # 新增：获取历史/最新 K 线（公共端点）
+    def get_candles(self, inst_id: str, bar: str = "1m", before: Optional[str] = None, after: Optional[str] = None, limit: int = 100) -> OKXResponse:
+        """获取最近一段时间的 K 线：/api/v5/market/candles
+        - 参数：instId, bar(如 1m/5m/1H/1D), before/after(毫秒时间戳), limit(条数)
+        - 该端点通常返回“最近”的数据窗口
+        """
+        path = "/api/v5/market/candles"
+        params: Dict[str, Any] = {"instId": inst_id, "bar": bar, "limit": str(limit)}
+        if before is not None:
+            params["before"] = str(before)
+        if after is not None:
+            params["after"] = str(after)
+        return self._request_public("GET", path, params=params)
+
+    def get_history_candles(self, inst_id: str, bar: str = "1m", before: Optional[str] = None, after: Optional[str] = None, limit: int = 100) -> OKXResponse:
+        """获取历史 K 线：/api/v5/market/history-candles（更适合翻页拉历史）
+        - 参数同 get_candles
+        """
+        path = "/api/v5/market/history-candles"
+        params: Dict[str, Any] = {"instId": inst_id, "bar": bar, "limit": str(limit)}
+        if before is not None:
+            params["before"] = str(before)
+        if after is not None:
+            params["after"] = str(after)
+        return self._request_public("GET", path, params=params)
+
+    def fetch_ohlcv_range(self, inst_id: str, bar: str, start: datetime, end: datetime, limit_per_call: int = 100, use_history: bool = True) -> Tuple[bool, Optional[List[List[str]]]]:
+        """分页拉取指定时间区间的 OHLCV（闭区间近似）。
+        返回 (ok, raw_list)，其中 raw_list 为原始数组列表（每条形如 [ts, o, h, l, c, vol, ...]）。
+        实现要点：
+        - OKX 返回的 K 线通常是“倒序”（最新在前），因此分页时采用 before=上一次最早 ts-1ms 逐步向过去推进；
+        - 拉取完毕后由调用方自行排序与去重。
+        """
+        if end <= start:
+            return False, None
+        # OKX 参数使用毫秒时间戳
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+        all_rows: List[List[str]] = []
+        cursor = end_ms
+        try:
+            while True:
+                # 选择端点：优先使用 history-candles
+                if use_history:
+                    resp = self.get_history_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
+                else:
+                    resp = self.get_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
+                if not resp.ok or not resp.data:
+                    break
+                rows: List[List[str]] = resp.data  # type: ignore
+                if not rows:
+                    break
+                all_rows.extend(rows)
+                # rows 可能为倒序（最新在前），找到这一批中最早的 ts 作为下一页 before
+                ts_vals = [int(r[0]) for r in rows if len(r) > 0]
+                if not ts_vals:
+                    break
+                min_ts = min(ts_vals)
+                # 终止条件：已经越过起点
+                if min_ts <= start_ms:
+                    break
+                cursor = min_ts - 1
+                # 简单限速，避免触发 429
+                try:
+                    import time
+                    time.sleep(0.15)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error("拉取 OHLCV 发生异常: {}", e)
+            return False, None
+        # 过滤区间并返回
+        filtered = [r for r in all_rows if len(r) >= 5 and start_ms <= int(r[0]) <= end_ms]
+        return True, filtered
 
     def close(self) -> None:
         try:

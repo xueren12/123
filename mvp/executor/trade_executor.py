@@ -30,7 +30,7 @@ from loguru import logger
 from utils.config import AppConfig
 from utils.db import TimescaleDB
 from executor.okx_rest import OKXRESTClient, OKXResponse
-from utils.risk import RiskManager, OrderIntent, MarketState, AccountState
+from utils.risk import MarketState, AccountState  # 关闭风控：不再导入 RiskManager/OrderIntent
 from utils.audit import AuditLogger
 
 
@@ -397,10 +397,10 @@ class TradeExecutor:
         self._ensure_logfile()
         # 审计
         self.audit = AuditLogger(cfg)
-        # 风控/熔断
+        # 风控/熔断（仅保留熔断，不启用事前风控）
         self.guard = CircuitBreaker(cfg, audit=self.audit)
-        # 新增：事前风控
-        self.risk: RiskManager = risk_manager or RiskManager(cfg)
+        # 关闭事前风控：不再构造 RiskManager
+        self.risk = None
         # 可注入账户/行情状态提供器，便于测试与集成
         self._account_state_provider: Optional[Callable[[str], AccountState]] = None
         self._market_state_provider: Optional[Callable[[str, Optional[float]], MarketState]] = None
@@ -585,57 +585,8 @@ class TradeExecutor:
         # 下单前价格（用于熔断估算 & 风控参考价）
         p0 = self.guard.get_last_price(signal.symbol)
 
-        # 事前风控校验
-        meta = signal.meta or {}
-        intent = OrderIntent(
-            inst_id=signal.symbol,
-            side=signal.side,
-            order_type=ord_type,
-            qty=float(signal.size),
-            price=float(signal.price) if signal.price is not None else None,
-            reference_price=None,  # 不再依赖参考价，交由风控内部自行兜底或忽略
-            stop_loss_price=float(meta.get("slTriggerPx") or meta.get("slOrdPx")) if (meta.get("slTriggerPx") or meta.get("slOrdPx")) else None,
-            expected_slippage_pct=(float(meta.get("expectedSlippagePct")) if meta.get("expectedSlippagePct") is not None else (
-                float(meta.get("expectedSlippage")) if meta.get("expectedSlippage") is not None else None
-            )),
-            worst_move_pct=(float(meta.get("worstMovePct")) if meta.get("worstMovePct") is not None else None),
-        )
-        account = (self._account_state_provider(signal.symbol) if self._account_state_provider else self._default_account_state(signal.symbol))
-        market = (self._market_state_provider(signal.symbol, p0) if self._market_state_provider else self._default_market_state(signal.symbol, p0))
-        risk_res = self.risk.validate_order(intent, account, market)
-        if not risk_res.allowed:
-            reason = "risk_reject: " + "; ".join(risk_res.violations)
-            self._append_log({
-                "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
-                "price": signal.price, "size": signal.size, "reason": reason, "ok": False,
-                "order_id": None, "exchange_code": "-2", "exchange_msg": "risk_block", "raw": "{}",
-            })
-            # 审计：风险拦截
-            try:
-                if self.audit:
-                    self.audit.log(
-                        event_type="risk_block",
-                        ctx_id=ctx_id,
-                        module="executor",
-                        inst_id=signal.symbol,
-                        action="place_order",
-                        request={
-                            "side": signal.side,
-                            "ord_type": ord_type,
-                            "price": signal.price,
-                            "size": signal.size,
-                            "meta": signal.meta,
-                        },
-                        response={"allowed": False, "violations": risk_res.violations},
-                        status="blocked",
-                        err=reason,
-                        latency_ms=None,
-                        extra=None,
-                        ts=signal.ts.isoformat(),
-                    )
-            except Exception as e:
-                logger.debug("写入审计失败（忽略）：{}", e)
-            return ExecResult(ok=False, mode=self.mode, signal=signal, err=reason)
+        # 事前风控校验：按需求移除，直接进入下单流程（仍保留后续熔断监控）
+        # 注意：账户/行情状态提供器仍可用于后续扩展，这里不再阻断下单。
 
         # 审计：下单意图
         try:

@@ -11,11 +11,16 @@ K线驱动的均线+突破策略回测（独立模块）
 - 输出：回测摘要、CSV（data/backtest_ma_breakout.csv）、SVG 图（data/backtest_ma_breakout.svg）。
 
 用法示例（PowerShell）：
+  # 从数据库读取（默认）
   py backtest/ma_backtest.py --inst BTC-USDT --start "2025-01-01" --end "2025-01-07" \
       --timeframe 5min --fast 10 --slow 30 --brk 20 --buffer 0.001 --fee_bps 2 --plot 1
 
+  # 从本地CSV读取（方案一：离线拉取 → 保存 → 回测）
+  py backtest/ma_backtest.py --source csv --csv "data/ohlcv_BTC-USDT_1m_2025-01-01_2025-01-07.csv" \
+      --inst BTC-USDT --start "2025-01-01" --end "2025-01-07" --timeframe 1min
+
 注意：
-- 需要数据库中存在该交易对在时间区间内的 trades 或 orderbook 数据。
+- 需要数据库中存在该交易对在时间区间内的 trades 或 orderbook 数据，或本地 CSV 含有 ts/open/high/low/close/volume 列。
 - 本模块仅为示例级回测，未考虑滑点/成交细节/资金曲线极端值稳定性等问题。
 """
 from __future__ import annotations
@@ -45,12 +50,16 @@ class MABacktestConfig:
     fee_bps: float = 0.0  # 双边手续费，单位: bp（基点）。例如 2 表示 0.02%
     stop_loss_pct: Optional[float] = None  # 可选：对称止损百分比
     plot: bool = True
+    # 新增：数据来源与CSV路径
+    source: str = "db"  # db/csv
+    csv_path: Optional[str] = None  # 当 source=csv 时必填
 
 
 class MABreakoutBacktester:
     def __init__(self, cfg: MABacktestConfig) -> None:
         self.cfg = cfg
-        self.db = TimescaleDB()
+        # 仅当需要从数据库读取时再初始化连接，避免纯CSV模式下的无谓依赖与失败
+        self.db = None
 
     @staticmethod
     def _parse_timeframe(tf: str) -> Tuple[str, int]:
@@ -65,10 +74,54 @@ class MABreakoutBacktester:
         return "1T", 60
 
     def _load_close_series(self) -> pd.Series:
+        """加载收盘价序列：支持 DB 与 本地CSV 两种来源。"""
         freq, _ = self._parse_timeframe(self.cfg.timeframe)
+        # =========== 分支一：从CSV加载（方案一的离线文件） ==========
+        if str(self.cfg.source).lower() == "csv":
+            path = self.cfg.csv_path
+            if not path:
+                raise RuntimeError("当 source=csv 时必须提供 --csv 路径")
+            try:
+                # 兼容两种列名风格：ts/open/high/low/close/volume 或 timestamp/o/h/l/c/v
+                df = pd.read_csv(path)
+            except Exception as e:
+                raise RuntimeError(f"读取CSV失败：{e}")
+            # 解析时间列
+            ts_col = None
+            for c in ["ts", "timestamp", "time", "date"]:
+                if c in df.columns:
+                    ts_col = c
+                    break
+            if ts_col is None:
+                raise RuntimeError("CSV 缺少时间列（期望: ts/timestamp/time/date 之一）")
+            try:
+                s_ts = pd.to_datetime(df[ts_col], utc=True)
+            except Exception:
+                # 若为毫秒时间戳
+                s_ts = pd.to_datetime(df[ts_col].astype("int64"), unit="ms", utc=True)
+            df = df.assign(ts=s_ts).set_index("ts").sort_index()
+            # 解析 close 列
+            close_col = None
+            for c in ["close", "c", "Close", "last"]:
+                if c in df.columns:
+                    close_col = c
+                    break
+            if close_col is None:
+                raise RuntimeError("CSV 缺少收盘价列（期望: close/c/last 之一）")
+            s = df[close_col].astype(float).resample(freq).last().ffill()
+            # 按回测窗口过滤，保持与 DB 分支一致
+            s = s[(s.index >= self.cfg.start) & (s.index <= self.cfg.end)].dropna()
+            if s.empty:
+                raise RuntimeError("CSV 转换后序列为空，请检查时间区间与列名是否正确")
+            return s
+
+        # =========== 分支二：从DB加载（原有逻辑） ==========
         # 读取 trades -> resample last -> ffill
         tr = None
         try:
+            # 懒初始化数据库连接
+            if self.db is None:
+                self.db = TimescaleDB()
             tr = self.db.fetch_trades_window(start=self.cfg.start, end=self.cfg.end, inst_id=self.cfg.inst, ascending=True)
         except Exception as e:
             logger.debug("读取 trades 失败，将回退 orderbook：{}", e)
@@ -79,6 +132,9 @@ class MABreakoutBacktester:
             if len(s) > 0:
                 return s
         # 回退到 orderbook mid
+        # 若此前未成功初始化，则此处再尝试一次（以便直接回退到 orderbook）
+        if self.db is None:
+            self.db = TimescaleDB()
         ob = self.db.fetch_orderbook_window(start=self.cfg.start, end=self.cfg.end, inst_id=self.cfg.inst, ascending=True)
         if ob is None or ob.empty:
             raise RuntimeError("数据库中缺少可用的 trades/orderbook 数据以构造收盘价序列")
@@ -209,6 +265,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--fee_bps", type=float, default=0.0, help="双边手续费，基点，例如 2=0.02%")
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")
     p.add_argument("--plot", type=int, default=1, help="是否导出SVG图：1是 0否")
+    # 新增：数据来源与CSV路径
+    p.add_argument("--source", choices=["db", "csv"], default="db", help="数据来源：db 从数据库读取；csv 从本地CSV读取")
+    p.add_argument("--csv", dest="csv_path", default=None, help="当 --source=csv 时，指定本地CSV文件路径")
     return p.parse_args()
 
 
@@ -236,6 +295,8 @@ if __name__ == "__main__":
         fee_bps=float(args.fee_bps),
         stop_loss_pct=(float(args.sl_pct) if args.sl_pct is not None else None),
         plot=bool(int(args.plot)),
+        source=str(args.source),
+        csv_path=args.csv_path,
     )
     bt = MABreakoutBacktester(cfg)
     res = bt.run()
