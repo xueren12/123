@@ -704,6 +704,22 @@ class TradeExecutor:
 
         # 止盈止损参数透传
         meta = signal.meta or {}
+        # 新增：全局禁用止盈/止损 —— 清理任何 tp/sl 字段，并标记执行器忽略止损逻辑
+        try:
+            meta["noSL"] = True
+            for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType", "tpTriggerPx", "tpOrdPx", "tpTriggerPxType"):
+                meta.pop(k, None)
+            # 防止通过 extra 透传止盈止损/附加委托
+            if isinstance(meta.get("extra"), dict):
+                extra = meta.get("extra")
+                # 去掉直接字段
+                for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType", "tpTriggerPx", "tpOrdPx", "tpTriggerPxType"):
+                    extra.pop(k, None)
+                # 去掉 attachAlgoOrds
+                extra.pop("attachAlgoOrds", None)
+                meta["extra"] = extra
+        except Exception:
+            pass
         # 规范化止损参数：若仅提供触发价则默认以市价委托执行止损（slOrdPx=-1），并设置默认触发价类型为 last，避免与交易所规则不匹配
         # 新增：若 meta['noSL'] 为 True，则不附带任何止损相关参数（用于“直接下单不设置止损”的场景）
         try:
@@ -777,12 +793,12 @@ class TradeExecutor:
             td_mode=meta.get("tdMode"),
             tgt_ccy=meta.get("tgtCcy"),
             cl_ord_id=meta.get("clOrdId"),
-            tp_trigger_px=meta.get("tpTriggerPx"),
-            tp_ord_px=meta.get("tpOrdPx"),
-            sl_trigger_px=meta.get("slTriggerPx"),
-            sl_ord_px=meta.get("slOrdPx"),
-            tp_trigger_px_type=meta.get("tpTriggerPxType"),
-            sl_trigger_px_type=meta.get("slTriggerPxType"),
+            tp_trigger_px=None,  # 强制不发送止盈
+            tp_ord_px=None,
+            sl_trigger_px=None,  # 强制不发送止损
+            sl_ord_px=None,
+            tp_trigger_px_type=None,
+            sl_trigger_px_type=None,
             extra=meta.get("extra"),
         )
 
