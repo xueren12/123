@@ -35,6 +35,7 @@ from utils.db import TimescaleDB
 from strategies.ma_breakout import MABreakoutStrategy, MABreakoutConfig
 from executor.trade_executor import TradeExecutor, TradeSignal
 from models.ai_advisor import AIAdvisor, build_payload
+from utils.position import PositionManager  # 引入仓位管理器
 
 
 class SystemOrchestrator:
@@ -48,6 +49,11 @@ class SystemOrchestrator:
         self.collector = OKXWSCollector(self.cfg) if self.collector_enabled else None
         # 执行器（根据配置模式初始化：mock/real/paused）
         self.executor = TradeExecutor(self.cfg, mode=self.cfg.exec.mode)
+        # 仓位管理器：基于账户权益与风险参数计算手数（价格来源于执行器的 guard）
+        try:
+            self.pos_manager = PositionManager(self.cfg, price_provider=self.executor.guard.get_last_price)
+        except Exception:
+            self.pos_manager = None
         # AI 模块（按需调用）
         self.ai = AIAdvisor(self.cfg)
         # AI 门控与监控开关
@@ -239,6 +245,13 @@ class SystemOrchestrator:
                                 logger.warning("[AI门控拦截] {} 信号={} 被拦截。{}", inst, side, ai_advice_desc or "")
                                 continue
 
+                            # —— 使用仓位管理器计算建议手数，失败回退到 TRADE_SIZE ——
+                            try:
+                                pm_size = self.pos_manager.compute_size(inst, side.lower()) if self.pos_manager else None
+                            except Exception:
+                                pm_size = None
+                            used_size = pm_size if (pm_size is not None and pm_size > 0) else trade_size
+
                             # 生成交易信号并执行（统一组装）
                             ts = sig.get("ts")
                             ord_type = str(sig.get("ord_type", "market")).lower()
@@ -258,12 +271,12 @@ class SystemOrchestrator:
 
                             trade_sig = TradeSignal(
                                 ts=ts, symbol=inst, side=side.lower(), price=None,
-                                size=trade_size, reason=reason,
+                                size=used_size, reason=reason,
                                 meta=meta,
                             )
                             res = self.executor.execute(trade_sig)
                             if res.ok:
-                                logger.success("[下单成功] {} {} size={} order_id={}", inst, side, trade_size, res.order_id)
+                                logger.success("[下单成功] {} {} size={} order_id={}", inst, side, used_size, res.order_id)
                                 # 成功后记录冷却时间戳
                                 self._last_trade_ts[inst] = time.time()
                                 # 更新虚拟持仓并输出
@@ -273,7 +286,7 @@ class SystemOrchestrator:
                                 except Exception:
                                     pass
                             else:
-                                logger.error("[下单失败] {} {} size={} err={}", inst, side, trade_size, res.err)
+                                logger.error("[下单失败] {} {} size={} err={}", inst, side, used_size, res.err)
                         else:
                             logger.debug("[策略] {} 信号=HOLD", inst)
                     except Exception as e:

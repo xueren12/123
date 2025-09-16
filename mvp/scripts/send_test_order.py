@@ -34,8 +34,8 @@ from loguru import logger
 
 # 本地导入
 from utils.config import AppConfig
-from executor.trade_executor import TradeExecutor, TradeSignal
-from utils.risk import MarketState
+from executor.trade_executor import TradeExecutor, TradeSignal, MarketState
+# from utils.risk import MarketState
 
 
 def _mk_market_state(ref_px: float) -> MarketState:

@@ -49,7 +49,6 @@ if ($Mode -eq "offline") {
     # 使用最新的CSV文件
     $csvFile = $csvFiles[0].FullName
     Write-Host "`n使用最新文件: $($csvFiles[0].Name)" -ForegroundColor Green
-    
 } elseif ($Mode -eq "download") {
     # 下载模式：先下载数据再回测
     Write-Host "`n===== 下载模式：获取最新数据 =====" -ForegroundColor Cyan
@@ -65,9 +64,9 @@ if ($Mode -eq "offline") {
     $csvFileName = "ohlcv_${Inst}_${Timeframe}_${Start}_${End}.csv"
     $csvFile = Join-Path $DataDir $csvFileName
     
-    # 构建下载命令
+    # 构建下载命令（显式使用 py）
     $downloadCmd = @(
-        "python", "-u", "mvp/scripts/download_ohlcv_okx.py",
+        "py", "-u", "mvp/scripts/download_ohlcv_okx.py",
         "--engine", "ccxt",
         "--ccxt-exchange", $Exchange,
         "--inst", $Inst,
@@ -78,26 +77,26 @@ if ($Mode -eq "offline") {
         "--timeout", "30000",
         "--max-retries", "5"
     )
-    
+
     if ($Proxy -ne "") {
         $downloadCmd += @("--proxy", $Proxy)
     }
-    
+
     Write-Host "执行下载命令..." -ForegroundColor Yellow
     Write-Host ($downloadCmd -join " ") -ForegroundColor Gray
-    
+
     & $downloadCmd[0] $downloadCmd[1..($downloadCmd.Length-1)]
-    
+
     if ($LASTEXITCODE -ne 0) {
         Write-Host "错误：数据下载失败！" -ForegroundColor Red
         exit 1
     }
-    
+
     if (!(Test-Path $csvFile)) {
         Write-Host "错误：CSV文件未生成！" -ForegroundColor Red
         exit 1
     }
-    
+
     $size = [math]::Round((Get-Item $csvFile).Length / 1KB, 2)
     Write-Host "下载完成: $csvFileName ($size KB)" -ForegroundColor Green
 }
@@ -109,7 +108,7 @@ $backtest_inst = $Inst -replace "-SWAP", ""  # 移除-SWAP后缀用于回测
 $backtest_timeframe = $Timeframe -replace "m", "min"  # 转换时间框架格式
 
 $backtestCmd = @(
-    "python", "-u", "mvp/backtest/ma_backtest.py",
+    "py", "-u", "mvp/backtest/ma_backtest.py",
     "--source", "csv",
     "--csv", $csvFile,
     "--inst", $backtest_inst,

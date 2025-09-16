@@ -20,7 +20,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Callable
@@ -30,7 +30,22 @@ from loguru import logger
 from utils.config import AppConfig
 from utils.db import TimescaleDB
 from executor.okx_rest import OKXRESTClient, OKXResponse
-from utils.risk import MarketState, AccountState  # 关闭风控：不再导入 RiskManager/OrderIntent
+# 已移除外部风控依赖：本文件内定义 MarketState/AccountState
+# from utils.risk import MarketState, AccountState  # 关闭风控：不再导入 RiskManager/OrderIntent
+# 市场状态数据结构（用于参考价等）
+@dataclass
+class MarketState:
+    mid_price: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+
+# 账户状态数据结构（用于统计持仓与日内盈亏）
+@dataclass
+class AccountState:
+    equity_usd: float
+    position_usd_by_instrument: Dict[str, float] = field(default_factory=dict)
+    open_orders_count_by_instrument: Dict[str, int] = field(default_factory=dict)
+    daily_realized_pnl_usd: float = 0.0
 from utils.audit import AuditLogger
 
 
