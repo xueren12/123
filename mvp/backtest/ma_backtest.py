@@ -33,26 +33,53 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 from loguru import logger
+import json  # 新增：用于写出回测汇总 JSON
+
+# 兼容脚本直接运行的导入路径（将 mvp 目录加入 sys.path）
+# 说明：当直接执行 mvp/backtest/ma_backtest.py 时，默认工作目录可能无法解析 from utils.xxx
+# 因此将上级目录（mvp）加入模块搜索路径，保证内部包可正常导入。
+import os as _os
+import sys as _sys
+_CUR_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_MVP_DIR = _os.path.abspath(_os.path.join(_CUR_DIR, ".."))
+if _MVP_DIR not in _sys.path:
+    _sys.path.insert(0, _MVP_DIR)
 
 from utils.db import TimescaleDB
 
 
 @dataclass
 class MABacktestConfig:
+    # 基础参数
     inst: str
     start: datetime
     end: datetime
     timeframe: str = "5min"
+    # 旧参数（兼容用，不再直接用于信号计算）
     fast: int = 10
     slow: int = 30
     brk: int = 20
     buffer: float = 0.0
+    # 成本与输出
     fee_bps: float = 0.0  # 双边手续费，单位: bp（基点）。例如 2 表示 0.02%
-    stop_loss_pct: Optional[float] = None  # 可选：对称止损百分比
+    stop_loss_pct: Optional[float] = None  # 可选：对称止损百分比（仅记录，不强制执行）
     plot: bool = True
-    # 新增：数据来源与CSV路径
+    # 数据来源与CSV路径
     source: str = "db"  # db/csv
     csv_path: Optional[str] = None  # 当 source=csv 时必填
+    # 新策略参数（多指标确认）
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    bb_period: int = 20
+    bb_k: float = 2.0
+    rsi_period: int = 14
+    rsi_buy: float = 55.0
+    rsi_sell: float = 45.0
+    aroon_period: int = 25
+    aroon_buy: float = 70.0
+    aroon_sell: float = 30.0
+    confirm_min: int = 3
 
 
 class MABreakoutBacktester:
@@ -67,15 +94,16 @@ class MABreakoutBacktester:
         s = str(tf).lower().strip().replace("min", "m")
         if s.endswith("m"):
             mins = int(s[:-1])
-            return f"{mins}T", mins * 60
+            return f"{mins}min", mins * 60
         if s.endswith("s"):
             secs = int(s[:-1])
-            return f"{secs}S", secs
-        return "1T", 60
+            return f"{secs}s", secs
+        return "1min", 60
 
     def _load_close_series(self) -> pd.Series:
         """加载收盘价序列：支持 DB 与 本地CSV 两种来源。"""
-        freq, _ = self._parse_timeframe(self.cfg.timeframe)
+        freq, step_secs = self._parse_timeframe(self.cfg.timeframe)
+        end_db = self.cfg.end + timedelta(seconds=step_secs)
         # =========== 分支一：从CSV加载（方案一的离线文件） ==========
         if str(self.cfg.source).lower() == "csv":
             path = self.cfg.csv_path
@@ -122,20 +150,21 @@ class MABreakoutBacktester:
             # 懒初始化数据库连接
             if self.db is None:
                 self.db = TimescaleDB()
-            tr = self.db.fetch_trades_window(start=self.cfg.start, end=self.cfg.end, inst_id=self.cfg.inst, ascending=True)
+            tr = self.db.fetch_trades_window(start=self.cfg.start, end=end_db, inst_id=self.cfg.inst, ascending=True)
         except Exception as e:
             logger.debug("读取 trades 失败，将回退 orderbook：{}", e)
         if tr is not None and not tr.empty:
             tr["ts"] = pd.to_datetime(tr["ts"], utc=True)
             s = tr.set_index("ts").sort_index()["price"].astype(float).resample(freq).last()
-            s = s.ffill().dropna()
+            s = s.ffill()
+            s = s[(s.index >= self.cfg.start) & (s.index <= self.cfg.end)].dropna()
             if len(s) > 0:
                 return s
         # 回退到 orderbook mid
         # 若此前未成功初始化，则此处再尝试一次（以便直接回退到 orderbook）
         if self.db is None:
             self.db = TimescaleDB()
-        ob = self.db.fetch_orderbook_window(start=self.cfg.start, end=self.cfg.end, inst_id=self.cfg.inst, ascending=True)
+        ob = self.db.fetch_orderbook_window(start=self.cfg.start, end=end_db, inst_id=self.cfg.inst, ascending=True)
         if ob is None or ob.empty:
             raise RuntimeError("数据库中缺少可用的 trades/orderbook 数据以构造收盘价序列")
         ob["ts"] = pd.to_datetime(ob["ts"], utc=True)
@@ -148,7 +177,8 @@ class MABreakoutBacktester:
             except Exception:
                 return np.nan
         ob["mid"] = ob.apply(_mid, axis=1)
-        s = ob["mid"].resample(freq).last().ffill().dropna()
+        s = ob["mid"].resample(freq).last().ffill()
+        s = s[(s.index >= self.cfg.start) & (s.index <= self.cfg.end)].dropna()
         if s.empty:
             raise RuntimeError("构造收盘价序列失败：orderbook 数据不足")
         return s
@@ -203,6 +233,56 @@ class MABreakoutBacktester:
 
         stats = self._summary_stats(df)
         self._export(df)
+        
+        # 新增：计算胜率（winrate）并写出回测汇总 JSON，供 gradual_deploy.py 阈值检查使用
+        # 计算规则：将连续持仓区间视为一笔交易（pos!=0 的连续片段），以该区间净收益(ret)之和判断盈亏
+        try:
+            pos_series = df["pos"].fillna(0.0)
+            ret_series = df["ret"].fillna(0.0)
+            in_pos = pos_series.ne(0.0)
+            prev = in_pos.shift(1)
+            next_ = in_pos.shift(-1)
+            starts = in_pos & (~prev.fillna(False).astype(bool))
+            ends = in_pos & (~next_.fillna(False).astype(bool))
+            start_idx = list(df.index[starts])
+            end_idx = list(df.index[ends])
+            wins = 0
+            trades = 0
+            for s, e in zip(start_idx, end_idx):
+                seg_pnl = float(ret_series.loc[s:e].sum())
+                trades += 1
+                if seg_pnl > 0:
+                    wins += 1
+            winrate = float(wins / trades) if trades > 0 else 0.0
+        except Exception:
+            # 兜底：异常时将胜率置 0.0（避免阻塞后续流程）
+            winrate = 0.0
+
+        # 约定输出路径：data/backtest_summary.json（与 scripts/gradual_deploy.py 默认读取一致）
+        try:
+            summary_path = _os.path.join("data", "backtest_summary.json")
+            _os.makedirs(_os.path.dirname(summary_path), exist_ok=True)
+            summary_payload = {
+                "metrics": {
+                    # 夏普与回撤直接来自统计结果；回撤输出为正值幅度，便于与 0.05 之类的阈值比较
+                    "sharpe": float(stats.get("sharpe", 0.0)),
+                    "winrate": float(winrate),
+                    "max_drawdown": float(abs(stats.get("max_dd", 0.0))),
+                },
+                "context": {
+                    "inst": self.cfg.inst,
+                    "start": self.cfg.start.isoformat(),
+                    "end": self.cfg.end.isoformat(),
+                    "timeframe": self.cfg.timeframe,
+                    "bars": int(len(df)),
+                },
+            }
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary_payload, f, ensure_ascii=False, indent=2)
+            logger.info("已生成回测汇总 JSON -> {}", summary_path)
+        except Exception as e:
+            logger.warning("写出回测汇总 JSON 失败：{}", e)
+
         return {"df": df, "stats": stats}
 
     @staticmethod
@@ -253,19 +333,33 @@ class MABreakoutBacktester:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MA+Breakout 策略回测（K线驱动）")
+    p = argparse.ArgumentParser(description="MA+Breakout 策略回测（K线驱动，已升级为多指标确认）")
     p.add_argument("--inst", required=True, help="交易对，如 BTC-USDT")
     p.add_argument("--start", required=True, help="起始时间，ISO或日期，如 2025-01-01")
     p.add_argument("--end", required=True, help="结束时间，ISO或日期，如 2025-01-07")
     p.add_argument("--timeframe", default="5min", help="时间粒度，如 1min/5min/15min")
-    p.add_argument("--fast", type=int, default=10, help="快线窗口")
-    p.add_argument("--slow", type=int, default=30, help="慢线窗口")
-    p.add_argument("--brk", type=int, default=20, help="突破回看窗口")
-    p.add_argument("--buffer", type=float, default=0.0, help="突破缓冲比例，如 0.001")
+    # 旧参数（兼容保留）
+    p.add_argument("--fast", type=int, default=10, help="兼容旧参数：快线窗口（映射为 MACD 快线窗口）")
+    p.add_argument("--slow", type=int, default=30, help="兼容旧参数：慢线窗口（映射为 MACD 慢线窗口）")
+    p.add_argument("--brk", type=int, default=20, help="兼容旧参数：突破回看窗口（映射为布林带窗口）")
+    p.add_argument("--buffer", type=float, default=0.0, help="兼容旧参数：突破缓冲比例（不再使用）")
     p.add_argument("--fee_bps", type=float, default=0.0, help="双边手续费，基点，例如 2=0.02%")
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")
     p.add_argument("--plot", type=int, default=1, help="是否导出SVG图：1是 0否")
-    # 新增：数据来源与CSV路径
+    # 新策略参数（若提供则覆盖旧参数所映射的默认值）
+    p.add_argument("--macd_fast", type=int, default=None, help="MACD EMA 快线窗口")
+    p.add_argument("--macd_slow", type=int, default=None, help="MACD EMA 慢线窗口")
+    p.add_argument("--macd_signal", type=int, default=None, help="MACD 信号线窗口")
+    p.add_argument("--bb_period", type=int, default=None, help="布林带窗口")
+    p.add_argument("--bb_k", type=float, default=None, help="布林带倍数（标准差倍数）")
+    p.add_argument("--rsi_period", type=int, default=None, help="RSI 窗口")
+    p.add_argument("--rsi_buy", type=float, default=None, help="RSI 多头阈值")
+    p.add_argument("--rsi_sell", type=float, default=None, help="RSI 空头阈值")
+    p.add_argument("--aroon_period", type=int, default=None, help="Aroon 窗口")
+    p.add_argument("--aroon_buy", type=float, default=None, help="Aroon 多头阈值（Up）")
+    p.add_argument("--aroon_sell", type=float, default=None, help="Aroon 空头阈值（Down）")
+    p.add_argument("--confirm_min", type=int, default=None, help="最少确认数（1~4）")
+    # 数据来源与CSV路径
     p.add_argument("--source", choices=["db", "csv"], default="db", help="数据来源：db 从数据库读取；csv 从本地CSV读取")
     p.add_argument("--csv", dest="csv_path", default=None, help="当 --source=csv 时，指定本地CSV文件路径")
     return p.parse_args()
@@ -273,21 +367,41 @@ def _parse_args() -> argparse.Namespace:
 
 def _parse_dt(s: str) -> datetime:
     s = s.strip()
+    txt = s.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(txt)
+        # 若无时区信息，则按 UTC 解释（不做本地->UTC 的转换）
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
-        # 仅日期
+        # 仅日期格式
         from datetime import datetime as _dt
         return _dt.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 if __name__ == "__main__":
     args = _parse_args()
+    # 组装新策略参数：若未提供新参数则使用旧参数映射/默认值
+    macd_fast = int(args.macd_fast) if args.macd_fast is not None else int(args.fast)
+    macd_slow = int(args.macd_slow) if args.macd_slow is not None else int(args.slow)
+    macd_signal = int(args.macd_signal) if args.macd_signal is not None else 9
+    bb_period = int(args.bb_period) if args.bb_period is not None else int(args.brk)
+    bb_k = float(args.bb_k) if args.bb_k is not None else 2.0
+    rsi_period = int(args.rsi_period) if args.rsi_period is not None else 14
+    rsi_buy = float(args.rsi_buy) if args.rsi_buy is not None else 55.0
+    rsi_sell = float(args.rsi_sell) if args.rsi_sell is not None else 45.0
+    aroon_period = int(args.aroon_period) if args.aroon_period is not None else 25
+    aroon_buy = float(args.aroon_buy) if args.aroon_buy is not None else 70.0
+    aroon_sell = float(args.aroon_sell) if args.aroon_sell is not None else 30.0
+    confirm_min = int(args.confirm_min) if args.confirm_min is not None else 3
+
     cfg = MABacktestConfig(
         inst=args.inst,
         start=_parse_dt(args.start),
         end=_parse_dt(args.end),
         timeframe=args.timeframe,
+        # 旧参数原样保留（仅用于向后兼容日志/导出）
         fast=max(2, int(args.fast)),
         slow=max(3, int(args.slow)),
         brk=max(2, int(args.brk)),
@@ -297,6 +411,19 @@ if __name__ == "__main__":
         plot=bool(int(args.plot)),
         source=str(args.source),
         csv_path=args.csv_path,
+        # 新策略参数
+        macd_fast=macd_fast,
+        macd_slow=macd_slow,
+        macd_signal=macd_signal,
+        bb_period=bb_period,
+        bb_k=bb_k,
+        rsi_period=rsi_period,
+        rsi_buy=rsi_buy,
+        rsi_sell=rsi_sell,
+        aroon_period=aroon_period,
+        aroon_buy=aroon_buy,
+        aroon_sell=aroon_sell,
+        confirm_min=confirm_min,
     )
     bt = MABreakoutBacktester(cfg)
     res = bt.run()

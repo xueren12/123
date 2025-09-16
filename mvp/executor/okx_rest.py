@@ -49,7 +49,7 @@ class OKXRESTClient:
             print("下单失败", resp.code, resp.msg)
     """
 
-    def __init__(self, cfg: AppConfig, timeout: float = 10.0) -> None:
+    def __init__(self, cfg: AppConfig, timeout: float = 30.0) -> None:
         self.cfg = cfg
         self.base_url = cfg.okx.base_url.rstrip("/")
         # 注：显式 strip 并校验 ASCII，避免 httpx 组包时因非 ASCII 报错
@@ -142,11 +142,21 @@ class OKXRESTClient:
         这样即便在 mock/paused 模式且未配置密钥，也能拿到参考价。
         """
         assert method.upper() == "GET", "公共接口目前仅支持 GET"
-        try:
-            r = self._client.get(path, params=params)
-        except httpx.RequestError as e:
-            logger.error("HTTP 公共请求异常: {}", e)
-            return OKXResponse(ok=False, code="-1", msg=str(e), data=None, raw={})
+        # 增加简单重试，缓解偶发超时
+        for attempt in range(3):
+            try:
+                r = self._client.get(path, params=params)
+                break
+            except httpx.RequestError as e:
+                logger.warning("HTTP 公共请求异常，重试 {}/3：{}", attempt + 1, e)
+                if attempt == 2:
+                    logger.error("HTTP 公共请求失败（已重试3次）: {}", e)
+                    return OKXResponse(ok=False, code="-1", msg=str(e), data=None, raw={})
+                try:
+                    import time as _t
+                    _t.sleep(0.6 * (attempt + 1))
+                except Exception:
+                    pass
         try:
             payload = r.json()
         except Exception:
@@ -293,6 +303,7 @@ class OKXRESTClient:
         返回 (ok, raw_list)，其中 raw_list 为原始数组列表（每条形如 [ts, o, h, l, c, vol, ...]）。
         实现要点：
         - OKX 返回的 K 线通常是“倒序”（最新在前），因此分页时采用 before=上一次最早 ts-1ms 逐步向过去推进；
+        - 同时使用 after=start_ms 对起点做硬性限界，防止服务端忽略 before 导致反复返回最新窗口；
         - 拉取完毕后由调用方自行排序与去重。
         """
         if end <= start:
@@ -302,32 +313,86 @@ class OKXRESTClient:
         end_ms = int(end.timestamp() * 1000)
         all_rows: List[List[str]] = []
         cursor = end_ms
+        # 新增：分页计数与累计条数，便于日志跟踪
+        page = 0
+        total = 0
+        # 新增：游标推进保护与页数上限，避免死循环
+        last_min_ts: Optional[int] = None
+        stall_count = 0
+        max_pages = 2000  # 安全上限，防止无限翻页
+        # 新增：当使用 after=start_ms 无返回时，自动回退为仅使用 before 翻页
+        try_with_after = True
         try:
             while True:
-                # 选择端点：优先使用 history-candles
+                # 选择端点：优先使用 history-candles，并根据 try_with_after 决定是否携带 after
                 if use_history:
-                    resp = self.get_history_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
+                    if try_with_after:
+                        resp = self.get_history_candles(inst_id=inst_id, bar=bar, before=str(cursor), after=str(start_ms), limit=limit_per_call)
+                    else:
+                        resp = self.get_history_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
                 else:
-                    resp = self.get_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
-                if not resp.ok or not resp.data:
+                    if try_with_after:
+                        resp = self.get_candles(inst_id=inst_id, bar=bar, before=str(cursor), after=str(start_ms), limit=limit_per_call)
+                    else:
+                        resp = self.get_candles(inst_id=inst_id, bar=bar, before=str(cursor), limit=limit_per_call)
+                # 失败告警
+                if not resp.ok:
+                    logger.warning("K线请求失败：code={} msg={} cursor={} bar={} inst={}", resp.code, resp.msg, cursor, bar, inst_id)
+                    break
+                # 若开启了 after 但返回为空，进行一次“关闭 after”的回退重试（仅首次触发）
+                if try_with_after and (not resp.data or len(resp.data) == 0):
+                    logger.warning("携带 after=start_ms 的请求返回空，回退为仅 before 翻页再试一次（cursor={}）", cursor)
+                    try_with_after = False
+                    # 回到循环顶部，用相同 cursor 重发
+                    continue
+                if not resp.data:
+                    logger.info("分页结束：无更多数据（cursor={}）", cursor)
                     break
                 rows: List[List[str]] = resp.data  # type: ignore
                 if not rows:
+                    logger.info("分页结束：本页为空（cursor={}）", cursor)
                     break
-                all_rows.extend(rows)
-                # rows 可能为倒序（最新在前），找到这一批中最早的 ts 作为下一页 before
+                page += 1
+                rows_len = len(rows)
+                total += rows_len
+                # rows 可能为倒序（最新在前），找到这一批中最早/最晚的 ts
                 ts_vals = [int(r[0]) for r in rows if len(r) > 0]
                 if not ts_vals:
+                    logger.info("分页 #{}：无有效时间戳，提前结束", page)
                     break
                 min_ts = min(ts_vals)
+                max_ts = max(ts_vals)
+                # 人类可读时间范围
+                try:
+                    _iso = lambda ms: datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(timespec="seconds")
+                    logger.info("分页 #{}：本页 {} 条，时间范围 [{} ~ {}]，累计 {} 条", page, rows_len, _iso(min_ts), _iso(max_ts), total)
+                except Exception:
+                    logger.info("分页 #{}：本页 {} 条，累计 {} 条（时间解析失败）", page, rows_len, total)
+                all_rows.extend(rows)
                 # 终止条件：已经越过起点
                 if min_ts <= start_ms:
+                    logger.info("到达起点：min_ts={} <= start_ms={}，停止分页", min_ts, start_ms)
                     break
+                # 游标未推进保护：若最小时间戳未变或变大，累计计数，连续多次则终止
+                if last_min_ts is not None and min_ts >= last_min_ts:
+                    stall_count += 1
+                    logger.warning("检测到游标未推进（min_ts={} 上一页 min_ts={}），连续 {} 次", min_ts, last_min_ts, stall_count)
+                    if stall_count >= 3:
+                        logger.warning("游标连续未推进达到阈值，停止分页以避免死循环")
+                        break
+                else:
+                    stall_count = 0
+                last_min_ts = min_ts
+                # 更新下一页 before 游标
                 cursor = min_ts - 1
+                # 页数上限保护
+                if page >= max_pages:
+                    logger.warning("达到页数上限 {}，停止分页以避免长时间等待", max_pages)
+                    break
                 # 简单限速，避免触发 429
                 try:
                     import time
-                    time.sleep(0.15)
+                    time.sleep(0.2)
                 except Exception:
                     pass
         except Exception as e:
@@ -335,6 +400,67 @@ class OKXRESTClient:
             return False, None
         # 过滤区间并返回
         filtered = [r for r in all_rows if len(r) >= 5 and start_ms <= int(r[0]) <= end_ms]
+        try:
+            _iso2 = lambda ms: datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(timespec="seconds")
+            logger.info("分页完成：原始累计 {} 条，区间 [{} ~ {}] 过滤后 {} 条", total, _iso2(start_ms), _iso2(end_ms), len(filtered))
+        except Exception:
+            logger.info("分页完成：原始累计 {} 条，过滤后 {} 条（时间解析失败）", total, len(filtered))
+
+        # 若过滤后为空，尝试使用“前向分页（仅 after 游标）”进行一次补拉，以规避部分区间 before/after 组合导致的空窗口/游标停滞
+        if len(filtered) == 0:
+            try:
+                logger.info("过滤后为空，启用前向分页补拉（仅 after 游标）")
+                f_all: List[List[str]] = []
+                cursor2 = start_ms
+                page2 = 0
+                max_pages2 = 2000
+                while True:
+                    if use_history:
+                        resp2 = self.get_history_candles(inst_id=inst_id, bar=bar, after=str(cursor2), limit=limit_per_call)
+                    else:
+                        resp2 = self.get_candles(inst_id=inst_id, bar=bar, after=str(cursor2), limit=limit_per_call)
+                    if not resp2.ok:
+                        logger.warning("前向分页请求失败：code={} msg={} cursor={} bar={} inst={}", resp2.code, resp2.msg, cursor2, bar, inst_id)
+                        break
+                    rows2: List[List[str]] = resp2.data or []  # type: ignore
+                    if not rows2:
+                        logger.info("前向分页结束：无更多数据（cursor={}）", cursor2)
+                        break
+                    page2 += 1
+                    ts_vals2 = [int(r[0]) for r in rows2 if len(r) > 0]
+                    if not ts_vals2:
+                        logger.info("前向分页 #{}：无有效时间戳，提前结束", page2)
+                        break
+                    min_ts2 = min(ts_vals2)
+                    max_ts2 = max(ts_vals2)
+                    try:
+                        _iso = lambda ms: datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(timespec="seconds")
+                        logger.info("前向分页 #{}：本页 {} 条，时间范围 [{} ~ {}]，累计 {} 条", page2, len(rows2), _iso(min_ts2), _iso(max_ts2), len(f_all) + len(rows2))
+                    except Exception:
+                        logger.info("前向分页 #{}：本页 {} 条，累计 {} 条（时间解析失败）", page2, len(rows2), len(f_all) + len(rows2))
+                    f_all.extend(rows2)
+                    if max_ts2 >= end_ms:
+                        logger.info("前向到达终点：max_ts={} >= end_ms={}，停止", max_ts2, end_ms)
+                        break
+                    cursor2 = max_ts2 + 1
+                    if page2 >= max_pages2:
+                        logger.warning("前向分页达到页数上限 {}，停止", max_pages2)
+                        break
+                    try:
+                        import time
+                        time.sleep(0.2)
+                    except Exception:
+                        pass
+                f_filtered = [r for r in f_all if len(r) >= 5 and start_ms <= int(r[0]) <= end_ms]
+                try:
+                    logger.info("前向分页完成：累计 {} 条，过滤后 {} 条", len(f_all), len(f_filtered))
+                except Exception:
+                    logger.info("前向分页完成：过滤后 {} 条（时间解析失败）", len(f_filtered))
+                if f_filtered:
+                    return True, f_filtered
+            except Exception as _e:
+                logger.warning("前向补拉异常：{}", _e)
+
         return True, filtered
 
     def close(self) -> None:
