@@ -48,7 +48,7 @@ class MABreakoutConfig:
 
     # 风控/执行辅助（仅作为信号建议透传到 meta）
     order_type: str = "market"             # 市价/限价（ordType）
-    stop_loss_pct: Optional[float] = 0.005  # 止损百分比；None 表示不建议 SL
+    stop_loss_pct: Optional[float] = 0.005  # 止损百分比；None 表示不建议 SL（通用兜底）
 
     # —— 新增：多指标参数 ——
     macd_fast: int = 12                    # MACD EMA 快线窗口
@@ -68,6 +68,20 @@ class MABreakoutConfig:
 
     confirm_min: int = 3                   # 至少满足的确认数（1~4）
 
+    # —— 新增：止损参数 ——
+    atr_n: float = 2.0                     # ATR 止损倍数 N（止损阈值 = 入场价 - N * ATR），ATR 周期固定为 14
+    stop_loss_pct_btc: float = 0.03        # BTC 固定百分比止损（默认 3%）
+    stop_loss_pct_eth: float = 0.04        # ETH 固定百分比止损（默认 4%）
+
+    # —— 新增：止盈参数 ——
+    tp_r1: float = 1.0                     # 第一级 R 倍数（达到即部分止盈）
+    tp_r2: float = 2.0                     # 第二级 R 倍数（达到即再次部分止盈）
+    tp_frac1: float = 0.3                  # 第一级止盈平掉比例（默认 30%）
+    tp_frac2: float = 0.3                  # 第二级止盈再平掉比例（默认 30%）
+    tp_trail_atr_mult: float = 1.5         # 移动止损 ATR 倍数（默认 1.5）
+    rsi_tp_high: float = 80.0              # RSI 技术止盈上阈值（部分止盈）
+    rsi_tp_low: float = 20.0               # RSI 技术止盈下阈值（部分止盈）
+    rsi_tp_frac: float = 0.2               # RSI 技术止盈建议平掉比例（默认 20%）
 
 class MABreakoutStrategy:
     """多指标确认策略（MACD + 布林带 + RSI + Aroon）"""
@@ -75,6 +89,17 @@ class MABreakoutStrategy:
     def __init__(self, cfg: MABreakoutConfig) -> None:
         self.cfg = cfg
         self.db = TimescaleDB()
+        # —— 策略内轻量持仓状态（用于止损/止盈判定） ——
+        self._pos: int = 0                  # 0=空仓；1=持有多头（当前实现不做做空）
+        self._entry_price: Optional[float] = None
+        self._entry_ts: Optional[datetime] = None
+        # —— 止盈管理相关状态 ——
+        self._tp1_done: bool = False        # 是否已完成 1R 部分止盈
+        self._tp2_done: bool = False        # 是否已完成 2R 部分止盈
+        self._remain_frac: float = 0.0      # 估计剩余仓位比例（仅用于策略内止盈序列控制）
+        self._trail_stop: Optional[float] = None  # 移动止损价格（不可下降）
+        self._entry_high: Optional[float] = None  # 入场后最高价（用于移动止损）
+        self._init_risk: Optional[float] = None   # 以“最近一次入场的有效止损价”计算的每单位风险 R（entry - stop）
 
     # --------------------
     # 内部工具
@@ -105,9 +130,10 @@ class MABreakoutStrategy:
         logger.warning("无法解析 timeframe={}，回退为 1min", tf)
         return "1T", 60
 
-    def _load_price_series(self) -> Tuple[pd.Series, Optional[pd.Series]]:
-        """加载近一段时间的收盘价序列。
-        返回 (close_series, ts_index_series)，索引为 UTC 时间。
+    def _load_price_series(self) -> pd.DataFrame:
+        """加载近一段时间的 OHLC 序列，索引为 UTC 时间。
+        优先使用 trades，若无则回退 orderbook mid；均以目标 timeframe 重采样。
+        返回 DataFrame，列为 ['open','high','low','close']。
         """
         freq, sec_per_bar = self._parse_timeframe(self.cfg.timeframe)
         # 依据多指标所需窗口，动态扩大最小读取 bars 数量，避免指标前期不稳定
@@ -119,6 +145,7 @@ class MABreakoutStrategy:
             int(self.cfg.bb_period + 5),
             int(self.cfg.rsi_period + 5),
             int(self.cfg.aroon_period + 1),
+            int(self.cfg.atr_n + 5),  # ATR 需要足够窗口
         )
         bars = int(needed * 1.5)
         # 读取窗口：多取一些，避免边界缺数据
@@ -126,20 +153,21 @@ class MABreakoutStrategy:
         end = datetime.now(timezone.utc)
         start = end - timedelta(seconds=window_secs)
 
-        # 优先 trades
-        close_series: Optional[pd.Series] = None
+        # 优先 trades：直接重采样为 OHLC
+        ohlc: Optional[pd.DataFrame] = None
         try:
             tr = self.db.fetch_trades_window(start=start, end=end, inst_id=self.cfg.inst_id, ascending=True)
             if tr is not None and not tr.empty:
                 tr["ts"] = pd.to_datetime(tr["ts"], utc=True)
                 tr = tr.set_index("ts").sort_index()
-                s = tr["price"].astype(float).resample(freq).last()
-                close_series = s.ffill().dropna()
+                s = tr["price"].astype(float)
+                ohlc_tr = s.resample(freq).ohlc()
+                ohlc = ohlc_tr.dropna(how="all").ffill()
         except Exception as e:
             logger.debug("读取 trades 失败，准备回退：{}", e)
 
-        # 回退：使用 orderbook mid
-        if close_series is None or close_series.empty:
+        # 回退：使用 orderbook mid 构造 OHLC
+        if ohlc is None or ohlc.empty:
             try:
                 ob = self.db.fetch_orderbook_window(start=start, end=end, inst_id=self.cfg.inst_id, ascending=True)
                 if ob is not None and not ob.empty:
@@ -153,15 +181,23 @@ class MABreakoutStrategy:
                         except Exception:
                             return np.nan
                     ob["mid"] = ob.apply(_mid, axis=1)
-                    s = ob["mid"].resample(freq).last()
-                    close_series = s.ffill().dropna()
+                    s = ob["mid"].astype(float)
+                    df = s.resample(freq).agg(["first", "max", "min", "last"]).rename(columns={
+                        "first": "open", "max": "high", "min": "low", "last": "close"
+                    })
+                    ohlc = df.dropna(how="all").ffill()
             except Exception as e:
                 logger.error("读取 orderbook 失败：{}", e)
 
-        if close_series is None:
-            raise RuntimeError("无法构造收盘价序列：请确认数据库中存在 trades 或 orderbook 数据。")
+        if ohlc is None or ohlc.empty:
+            raise RuntimeError("无法构造 OHLC 序列：请确认数据库中存在 trades 或 orderbook 数据。")
 
-        return close_series, close_series.index.to_series()
+        # 确保列顺序
+        for col in ("open", "high", "low", "close"):
+            if col not in ohlc.columns:
+                ohlc[col] = np.nan
+        ohlc = ohlc[["open", "high", "low", "close"]]
+        return ohlc
 
     # --------------------
     # 信号计算
@@ -173,26 +209,28 @@ class MABreakoutStrategy:
           'signal': 'BUY'|'SELL'|'HOLD',
           'close': float, 'fast': float, 'slow': float,
           'brk_high': float, 'brk_low': float,
-          'reason': 'ma_breakout', 'sl': Optional[float], 'ord_type': 'market'|'limit'
+          'reason': 'ma_breakout'|'stoploss_*', 'sl': Optional[float], 'ord_type': 'market'|'limit'
         }
         说明：本策略中 fast/slow 分别为 MACD 线与信号线，brk_high/brk_low 为布林带上/下轨；
         若数据不足则返回 None。
         """
         try:
-            close, _ = self._load_price_series()
+            ohlc = self._load_price_series()
+            close = ohlc["close"]
         except Exception as e:
             logger.warning("获取数据失败：{}", e)
             return None
 
         # 计算指标所需的最小数据长度
+        atr_period = 14  # ATR 周期固定 14（若需可后续扩展为可配置）
         min_need = max(
             int(self.cfg.macd_slow + self.cfg.macd_signal + 5),
             int(self.cfg.bb_period + 5),
             int(self.cfg.rsi_period + 5),
             int(self.cfg.aroon_period + 1),
+            int(atr_period + 5),
         )
         if len(close) < min_need:
-            # 数据不足以稳定计算多指标
             return None
 
         # ============ 指标计算：全部基于 pandas ============
@@ -225,16 +263,18 @@ class MABreakoutStrategy:
         aroon_up = (argmax + 1.0) / n_aroon * 100.0
         aroon_down = (argmin + 1.0) / n_aroon * 100.0
 
-        # 取最后两根用于交叉与阈值判定
-        c0, c1 = float(close.iloc[-2]), float(close.iloc[-1])
-        macd0, macd1 = float(macd_line.iloc[-2]), float(macd_line.iloc[-1])
-        sig0, sig1 = float(macd_signal.iloc[-2]), float(macd_signal.iloc[-1])
-        bb_up1, bb_low1 = float(bb_upper.iloc[-1]), float(bb_lower.iloc[-1])
-        rsi1 = float(rsi.iloc[-1]) if not np.isnan(float(rsi.iloc[-1])) else None
-        a_up1 = float(aroon_up.iloc[-1]) if not np.isnan(float(aroon_up.iloc[-1])) else None
-        a_dn1 = float(aroon_down.iloc[-1]) if not np.isnan(float(aroon_down.iloc[-1])) else None
+        # 5) ATR（波动性）：使用标准 True Range 定义
+        high = ohlc["high"].astype(float)
+        low = ohlc["low"].astype(float)
+        prev_close = close.shift(1)
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(int(atr_period)).mean()
+        atr1 = float(atr.iloc[-1]) if not np.isnan(float(atr.iloc[-1])) else None
 
-        # ============ 多重确认逻辑 ============
+        # ============ 多重确认逻辑 ==========
         # MACD 确认：金叉/死叉 或者 位于信号线上下且方向一致
         macd_cross_up = (macd0 <= sig0) and (macd1 > sig1)
         macd_cross_dn = (macd0 >= sig0) and (macd1 < sig1)
@@ -259,37 +299,186 @@ class MABreakoutStrategy:
         sell_confirms = int(macd_bear_ok) + int(bb_bear_ok) + int(rsi_bear_ok) + int(aroon_bear_ok)
         need = int(max(1, min(4, int(self.cfg.confirm_min))))
 
-        # 生成信号：至少满足确认数，且方向上不“打架”
+        # 生成“基础信号”：至少满足确认数，且方向上不“打架”
         if buy_confirms >= need and buy_confirms > sell_confirms:
-            sig = "BUY"
+            base_sig = "BUY"
         elif sell_confirms >= need and sell_confirms > buy_confirms:
-            sig = "SELL"
+            base_sig = "SELL"
         else:
-            sig = "HOLD"
+            base_sig = "HOLD"
 
-        # 止损建议（对称百分比）
-        sl: Optional[float] = None
-        if self.cfg.stop_loss_pct and self.cfg.stop_loss_pct > 0:
-            if sig == "BUY":
-                sl = c1 * (1.0 - float(self.cfg.stop_loss_pct))
-            elif sig == "SELL":
-                sl = c1 * (1.0 + float(self.cfg.stop_loss_pct))
+        reason = "ma_breakout"
+        out_sig = base_sig
+        size_frac_suggest: Optional[float] = None  # 建议的部分平仓比例（仅在 SELL 且部分平仓时给出）
+
+        # ============ 止盈模块（TakeProfit）============
+        # 1) 分批止盈：达到 1R/2R 分别止盈 30%/30%；
+        # 2) 移动止损：多单 = 入场后最高价 - ATR*1.5（trail 不回撤）；
+        # 3) 技术止盈：RSI 极值 -> 部分止盈；Aroon 反转 -> 全平。
+        tp_triggered = False
+        if self._pos > 0 and self._entry_price is not None:
+            # —— 入场后最高价 & 移动止损 ——
+            if high1 is not None:
+                if self._entry_high is None:
+                    self._entry_high = high1
+                else:
+                    self._entry_high = max(self._entry_high, high1)
+            if atr1 is not None and atr1 > 0 and self._entry_high is not None:
+                trail_cand = float(self._entry_high) - float(self.cfg.tp_trail_atr_mult) * float(atr1)
+                if self._trail_stop is None:
+                    self._trail_stop = trail_cand
+                else:
+                    # 移动止损只抬不降
+                    self._trail_stop = max(self._trail_stop, trail_cand)
+
+            # —— Aroon 反转：全平 ——
+            aroon_rev = False
+            if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
+                aroon_rev = (a_up0 >= a_dn0) and (a_dn1 > a_up1)
+            if aroon_rev and (self._remain_frac is None or self._remain_frac > 0):
+                out_sig = "SELL"
+                reason = "takeprofit_aroon_rev"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+                tp_triggered = True
+
+            # —— 移动止损：剩余仓位交给移动止损 ——
+            if not tp_triggered and self._trail_stop is not None and c1 <= float(self._trail_stop):
+                out_sig = "SELL"
+                reason = "takeprofit_trail"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+                tp_triggered = True
+
+            # —— R 倍数分批止盈 ——
+            if not tp_triggered and self._init_risk is not None and self._init_risk > 0:
+                r_mult = (c1 - float(self._entry_price)) / float(self._init_risk)
+                # 先判断 2R，再判断 1R（避免 2R 到达却先触发 1R）
+                if (not self._tp2_done) and r_mult >= float(self.cfg.tp_r2) and (self._remain_frac or 0.0) > 0:
+                    out_sig = "SELL"
+                    reason = "takeprofit_r2"
+                    size_frac_suggest = float(min(float(self.cfg.tp_frac2), float(self._remain_frac or 1.0)))
+                    tp_triggered = True
+                elif (not self._tp1_done) and r_mult >= float(self.cfg.tp_r1) and (self._remain_frac or 0.0) > 0:
+                    out_sig = "SELL"
+                    reason = "takeprofit_r1"
+                    size_frac_suggest = float(min(float(self.cfg.tp_frac1), float(self._remain_frac or 1.0)))
+                    tp_triggered = True
+
+            # —— 技术止盈：RSI 极值（部分止盈）——
+            if not tp_triggered and rsi1 is not None and (rsi1 >= float(self.cfg.rsi_tp_high) or rsi1 <= float(self.cfg.rsi_tp_low)):
+                out_sig = "SELL"
+                reason = "takeprofit_rsi"
+                size_frac_suggest = float(min(float(self.cfg.rsi_tp_frac), float(self._remain_frac or 1.0) if (self._remain_frac is not None) else 1.0))
+                tp_triggered = True
+
+        # ============ 止损模块（StopLoss）============
+        # 若已触发止盈，则本轮不再评估止损（均会触发 SELL）。
+        if (not tp_triggered) and self._pos > 0 and self._entry_price is not None:
+            stop_hit = None
+            stop_pct = None
+            # 1) ATR 止损
+            if atr1 is not None and atr1 > 0:
+                atr_stop = float(self._entry_price) - float(self.cfg.atr_n) * float(atr1)
+                if c1 <= atr_stop:
+                    stop_hit = "atr"
+            # 2) 固定百分比止损（按标的默认或全局覆盖）
+            sym = str(self.cfg.inst_id).upper()
+            pct_default = None
+            if sym.startswith("BTC"):
+                pct_default = float(self.cfg.stop_loss_pct_btc)
+            elif sym.startswith("ETH"):
+                pct_default = float(self.cfg.stop_loss_pct_eth)
+            stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+            if stop_pct is not None and stop_pct > 0:
+                pct_stop = float(self._entry_price) * (1.0 - float(stop_pct))
+                if c1 <= pct_stop and stop_hit is None:
+                    stop_hit = "pct"
+            # 3) 技术指标止损（多头反向）
+            macd_cross_dn = (macd0 >= sig0) and (macd1 < sig1)
+            tech_stop = (c1 < bb_low1) or macd_cross_dn
+            if tech_stop and stop_hit is None:
+                stop_hit = "tech"
+
+            if stop_hit is not None:
+                out_sig = "SELL"
+                reason = f"stoploss_{stop_hit}"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+
+        # ============ 策略内简单持仓状态机更新（支持部分止盈）============
+        try:
+            if out_sig == "BUY" and self._pos == 0:
+                # 开仓：记录入场与初始风险 R
+                self._pos = 1
+                self._entry_price = c1
+                self._entry_ts = close.index[-1].to_pydatetime()
+                self._entry_high = high1
+                self._tp1_done = False
+                self._tp2_done = False
+                self._remain_frac = 1.0
+                self._trail_stop = None
+                # 计算入场时的“有效止损价”（更近的那一个）：max(ATR止损价, 百分比止损价)
+                eff_stop = None
+                if atr1 is not None and atr1 > 0:
+                    eff_stop = (eff_stop if eff_stop is not None else -1e18)
+                    eff_stop = max(eff_stop, float(self._entry_price) - float(self.cfg.atr_n) * float(atr1))
+                sym = str(self.cfg.inst_id).upper()
+                pct_default = float(self.cfg.stop_loss_pct_btc) if sym.startswith("BTC") else (float(self.cfg.stop_loss_pct_eth) if sym.startswith("ETH") else None)
+                stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                if stop_pct is not None and stop_pct > 0:
+                    eff_stop = max(eff_stop or -1e18, float(self._entry_price) * (1.0 - float(stop_pct)))
+                if eff_stop is None or eff_stop <= 0 or eff_stop >= float(self._entry_price):
+                    # 兜底：若无法得到有效止损，按 1% 计算 R
+                    self._init_risk = float(self._entry_price) * 0.01
+                else:
+                    self._init_risk = float(self._entry_price) - float(eff_stop)
+
+            elif out_sig == "SELL" and self._pos == 1:
+                # 判断是否为“部分平仓”
+                if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                    # 部分减仓：更新剩余比例，但不将仓位清零
+                    self._remain_frac = max(0.0, float(self._remain_frac or 0.0) - float(size_frac_suggest))
+                    # 标记已完成的分批止盈级别
+                    if reason == "takeprofit_r1":
+                        self._tp1_done = True
+                    elif reason == "takeprofit_r2":
+                        self._tp2_done = True
+                    # 若已全部减完，则视为平仓
+                    if self._remain_frac <= 1e-6:
+                        self._pos = 0
+                        self._entry_price = None
+                        self._entry_ts = None
+                        self._entry_high = None
+                        self._trail_stop = None
+                        self._init_risk = None
+                        self._tp1_done = False
+                        self._tp2_done = False
+                else:
+                    # 全量卖出/止损/反转：清空状态
+                    self._pos = 0
+                    self._entry_price = None
+                    self._entry_ts = None
+                    self._entry_high = None
+                    self._trail_stop = None
+                    self._init_risk = None
+                    self._tp1_done = False
+                    self._tp2_done = False
+        except Exception:
+            # 状态更新失败不影响信号输出
+            pass
 
         return {
             "ts": close.index[-1].to_pydatetime(),
             "inst_id": self.cfg.inst_id,
             "timeframe": self.cfg.timeframe,
-            "signal": sig,
+            "signal": out_sig,
             "close": float(c1),
-            # 兼容输出：fast/slow -> MACD 线/信号线
             "fast": float(macd1),
             "slow": float(sig1),
-            # 兼容输出：brk_high/brk_low -> 布林带上/下轨
             "brk_high": float(bb_up1),
             "brk_low": float(bb_low1),
-            # 保留 reason 字段名与旧值，便于外层兼容
-            "reason": "ma_breakout",
-            "sl": float(sl) if sl is not None else None,
+            "reason": reason,
+            # 建议部分平仓比例（仅 SELL 且部分平仓时非空）；执行层可选使用
+            "size_frac": (float(size_frac_suggest) if size_frac_suggest is not None else None),
+            "sl": None,
             "ord_type": self.cfg.order_type,
         }
 

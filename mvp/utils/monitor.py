@@ -231,6 +231,19 @@ class RealTimeMonitor:
                 aroon_buy=float(os.getenv("MA_AROON_BUY", "70")),
                 aroon_sell=float(os.getenv("MA_AROON_SELL", "30")),
                 confirm_min=int(os.getenv("MA_CONFIRM_MIN", "3")),
+                # —— 新增：止损参数（可通过环境变量覆盖）——
+                atr_n=float(os.getenv("MA_ATR_N", "2.0")),  # ATR 倍数 N（止损价 = 入场价 - N * ATR）
+                stop_loss_pct_btc=float(os.getenv("MA_STOP_LOSS_PCT_BTC", "0.03")),  # BTC 固定百分比止损
+                stop_loss_pct_eth=float(os.getenv("MA_STOP_LOSS_PCT_ETH", "0.04")),  # ETH 固定百分比止损
+                # —— 新增：止盈参数（可通过环境变量覆盖）——
+                tp_r1=float(os.getenv("MA_TP_R1", "1.0")),             # 第一级 R 倍数（达到即部分止盈）
+                tp_r2=float(os.getenv("MA_TP_R2", "2.0")),             # 第二级 R 倍数（达到即再次部分止盈）
+                tp_frac1=float(os.getenv("MA_TP_FRAC1", "0.3")),       # 第一级止盈平掉比例
+                tp_frac2=float(os.getenv("MA_TP_FRAC2", "0.3")),       # 第二级止盈再平掉比例
+                tp_trail_atr_mult=float(os.getenv("MA_TP_TRAIL_ATR", "1.5")),  # 移动止损 ATR 倍数
+                rsi_tp_high=float(os.getenv("MA_RSI_TP_HIGH", "80")),   # RSI 技术止盈上阈值
+                rsi_tp_low=float(os.getenv("MA_RSI_TP_LOW", "20")),     # RSI 技术止盈下阈值
+                rsi_tp_frac=float(os.getenv("MA_RSI_TP_FRAC", "0.2")),  # RSI 技术止盈建议比例
             )
             self._ma_strategies[inst] = MABreakoutStrategy(cfg)
         return self._ma_strategies[inst]

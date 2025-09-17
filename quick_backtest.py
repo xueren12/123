@@ -26,6 +26,8 @@ import json
 import glob
 import subprocess
 from pathlib import Path
+from datetime import datetime
+import re
 
 # ====================== 可配置参数（按需修改） ======================
 CONFIG = {
@@ -39,11 +41,11 @@ CONFIG = {
     "inst": "ETH-USDT-SWAP",
 
     # K线周期：1m/5m/15m/1h/4h/1d 等
-    "timeframe": "5m",
+    "timeframe": "15m",
 
     # 起止日期（UTC）
-    "start": "2025-08-01",
-    "end": "2025-09-02",
+    "start": "2024-01-01",
+    "end": "2024-09-15",
 
     # 代理（如无需代理留空）。形如 "http://127.0.0.1:7890"
     "proxy": "http://127.0.0.1:7890",
@@ -108,7 +110,7 @@ def main() -> int:
     if CONFIG["mode"].lower() == "download":
         print("\n===== 下载阶段 =====")
         download_cmd = [
-            "py", "-u", str(PROJECT_DIR / "mvp" / "scripts" / "download_ohlcv_okx.py"),
+            sys.executable, "-u", str(PROJECT_DIR / "mvp" / "scripts" / "download_ohlcv_okx.py"),
             "--engine", "ccxt",
             "--ccxt-exchange", CONFIG["exchange"],
             "--inst", CONFIG["inst"],
@@ -152,7 +154,7 @@ def main() -> int:
     backtest_timeframe = CONFIG["timeframe"].replace("m", "min")
 
     backtest_cmd = [
-        "py", "-u", str(PROJECT_DIR / "mvp" / "backtest" / "ma_backtest.py"),
+        sys.executable, "-u", str(PROJECT_DIR / "mvp" / "backtest" / "ma_backtest.py"),
         "--source", "csv",
         "--csv", str(csv_path),
         "--inst", backtest_inst,
@@ -168,10 +170,22 @@ def main() -> int:
 
     # 3) 产物检查与摘要
     print("\n===== 回测产物 =====")
+    # 产物目录：与回测模块保持一致：data/start_YYYYMMDD_end_YYYYMMDD
+    try:
+        start_str = datetime.fromisoformat(CONFIG["start"].replace("Z", "")).strftime("%Y%m%d")
+    except Exception:
+        m = re.search(r"(\d{4})[^0-9]?(\d{2})[^0-9]?(\d{2})", CONFIG["start"]) ; start_str = "".join(m.groups()) if m else "start"
+    try:
+        end_str = datetime.fromisoformat(CONFIG["end"].replace("Z", "")).strftime("%Y%m%d")
+    except Exception:
+        m = re.search(r"(\d{4})[^0-9]?(\d{2})[^0-9]?(\d{2})", CONFIG["end"]) ; end_str = "".join(m.groups()) if m else "end"
+    tf_str = CONFIG["timeframe"].replace("m", "min")
+    out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}"
+
     products = [
-        data_dir / "backtest_ma_breakout.csv",
-        data_dir / "backtest_ma_breakout.svg",
-        data_dir / "backtest_summary.json",
+        out_dir / "backtest_ma_breakout.csv",
+        out_dir / "backtest_ma_breakout.svg",
+        out_dir / "backtest_summary.json",
     ]
 
     found = []
@@ -182,9 +196,9 @@ def main() -> int:
         else:
             print(f"[✗] {p}")
 
-    if (data_dir / "backtest_summary.json").exists():
+    if (out_dir / "backtest_summary.json").exists():
         try:
-            summary = json.loads((data_dir / "backtest_summary.json").read_text(encoding="utf-8"))
+            summary = json.loads((out_dir / "backtest_summary.json").read_text(encoding="utf-8"))
             m = summary.get("metrics", {})
             ctx = summary.get("context", {})
             print("\n===== 回测结果摘要 =====")
@@ -200,7 +214,7 @@ def main() -> int:
         input("按回车键退出...")
         return 1
 
-    print("\n回测完成！产物已保存到 data/ 目录。")
+    print(f"\n回测完成！产物已保存到 {out_dir} 目录。")
     input("按回车键退出...")
     return 0
 

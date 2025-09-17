@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import os
+import json  # 新增：支持从 JSON 载入交易纪律配置
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional, Any
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -175,6 +176,60 @@ class AuditConfig:
     file_prefix: str = os.getenv("AUDIT_FILE_PREFIX", "audit")
 
 
+# 新增：交易纪律/仓位与止盈止损集中配置（JSON）
+@dataclass
+class DisciplineConfig:
+    """交易纪律与风险参数（优先从 JSON 文件加载）。
+    默认文件路径：RULES_CONFIG_FILE 环境变量；未设置则使用 mvp/rules.json。
+    可配置项示例：
+    {
+      "risk_percent": 0.01,
+      "max_add_positions": 3,
+      "atr_stop_loss": 2.0,
+      "stop_loss_pct_btc": 0.03,
+      "stop_loss_pct_eth": 0.04,
+      "take_profit_split": [0.3, 0.3],
+      "trailing_atr": 1.5,
+      "cooldown_bars": 2,
+      "max_consecutive_losses": 3
+    }
+    """
+    file_path: str = field(default_factory=lambda: os.getenv("RULES_CONFIG_FILE", os.path.join("mvp", "rules.json")))
+    risk_percent: float = 0.01
+    max_add_positions: int = 3
+    atr_stop_loss: float = 2.0
+    stop_loss_pct_btc: float = 0.03
+    stop_loss_pct_eth: float = 0.04
+    take_profit_split: List[float] = field(default_factory=lambda: [0.3, 0.3])
+    trailing_atr: float = 1.5
+    cooldown_bars: int = 0  # 0 表示按秒级冷却配置（MA_COOLDOWN_SEC/COOLDOWN_SEC）
+    max_consecutive_losses: int = 3
+
+
+def load_discipline_config() -> DisciplineConfig:
+    """从 JSON 文件加载交易纪律配置；文件不存在或解析失败则使用默认值。
+    - 仅覆盖 JSON 中出现的字段，其余保留默认值。
+    """
+    cfg = DisciplineConfig()
+    path = cfg.file_path
+    try:
+        if path and os.path.exists(path) and os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data: Any = json.load(f)
+            if isinstance(data, dict):
+                # 逐字段覆盖
+                for k, v in data.items():
+                    if hasattr(cfg, k):
+                        try:
+                            setattr(cfg, k, v)
+                        except Exception:
+                            pass
+    except Exception:
+        # 静默失败，使用默认
+        pass
+    return cfg
+
+
 @dataclass
 class AppConfig:
     ws: WSConfig = field(default_factory=WSConfig)
@@ -194,3 +249,5 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     # 新增：审计日志配置
     audit: AuditConfig = field(default_factory=AuditConfig)
+    # 新增：交易纪律与集中风险参数（JSON）
+    discipline: DisciplineConfig = field(default_factory=load_discipline_config)

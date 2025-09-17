@@ -130,35 +130,46 @@ if ($LASTEXITCODE -ne 0) {
 # 检查回测产物
 Write-Host "`n===== 回测产物 =====" -ForegroundColor Cyan
 
+# 构造输出目录，与 Python 版保持一致
+try {
+    $startStr = (Get-Date $Start).ToString('yyyyMMdd')
+} catch {
+    if ($Start -match '(\d{4})\D?(\d{2})\D?(\d{2})') { $startStr = "$($Matches[1])$($Matches[2])$($Matches[3])" } else { $startStr = 'start' }
+}
+try {
+    $endStr = (Get-Date $End).ToString('yyyyMMdd')
+} catch {
+    if ($End -match '(\d{4})\D?(\d{2})\D?(\d{2})') { $endStr = "$($Matches[1])$($Matches[2])$($Matches[3])" } else { $endStr = 'end' }
+}
+$tfStr = $backtest_timeframe
+$outDir = Join-Path $DataDir "start_${startStr}_end_${endStr}_tf_${tfStr}"
+
 $products = @(
-    "data/backtest_ma_breakout.csv",
-    "data/backtest_ma_breakout.svg", 
-    "data/backtest_summary.json"
+    (Join-Path $outDir 'backtest_ma_breakout.csv'),
+    (Join-Path $outDir 'backtest_ma_breakout.svg'),
+    (Join-Path $outDir 'backtest_summary.json')
 )
 
-$foundProducts = @()
-foreach ($product in $products) {
-    if (Test-Path $product) {
-        $foundProducts += $product
-        Write-Host "[✓] $product" -ForegroundColor Green
-    } else {
-        Write-Host "[✗] $product" -ForegroundColor Red
+$found = @()
+foreach ($p in $products) {
+    if (Test-Path $p) { $found += $p; Write-Host "[✓] $p" -ForegroundColor Green } else { Write-Host "[✗] $p" -ForegroundColor DarkGray }
+}
+
+if (Test-Path (Join-Path $outDir 'backtest_summary.json')) {
+    try {
+        $summary = Get-Content (Join-Path $outDir 'backtest_summary.json') | ConvertFrom-Json
+        $m = $summary.metrics
+        $ctx = $summary.context
+        Write-Host "`n===== 回测结果摘要 =====" -ForegroundColor Cyan
+        Write-Host ("夏普比率: {0}" -f $m.sharpe)
+        Write-Host ("胜率: {0}%" -f ([math]::Round(($m.winrate)*100,2)))
+        Write-Host ("最大回撤: {0}%" -f ([math]::Round(($m.max_drawdown)*100,2)))
+        Write-Host ("数据条数: {0}" -f $ctx.bars)
+    } catch {
+        Write-Host "读取回测汇总失败: $_" -ForegroundColor Yellow
     }
 }
 
-if ($foundProducts.Count -gt 0) {
-    Write-Host "`n===== 回测结果摘要 =====" -ForegroundColor Cyan
-    
-    if (Test-Path "data/backtest_summary.json") {
-        $summary = Get-Content "data/backtest_summary.json" | ConvertFrom-Json
-        Write-Host "夏普比率: $($summary.metrics.sharpe)" -ForegroundColor White
-        Write-Host "胜率: $($summary.metrics.winrate * 100)%" -ForegroundColor White
-        Write-Host "最大回撤: $($summary.metrics.max_drawdown * 100)%" -ForegroundColor White
-        Write-Host "数据条数: $($summary.context.bars)" -ForegroundColor White
-    }
-    
-    Write-Host "`n回测完成！产物已保存到 data/ 目录" -ForegroundColor Green
-} else {
-    Write-Host "`n回测失败：未生成任何产物" -ForegroundColor Red
-    exit 1
-}
+if ($found.Count -eq 0) { Write-Host "`n回测失败：未生成任何产物。" -ForegroundColor Red; exit 1 }
+
+Write-Host "`n回测完成！产物已保存到 $outDir 目录。" -ForegroundColor Green

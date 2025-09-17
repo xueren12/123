@@ -87,6 +87,16 @@ class MABreakoutBacktester:
         self.cfg = cfg
         # 仅当需要从数据库读取时再初始化连接，避免纯CSV模式下的无谓依赖与失败
         self.db = None
+        # 新增：基于起止日期的独立输出目录，例如 data/start_YYYYMMDD_end_YYYYMMDD
+        try:
+            start_str = cfg.start.strftime("%Y%m%d")
+            end_str = cfg.end.strftime("%Y%m%d")
+        except Exception:
+            start_str = "start"
+            end_str = "end"
+        tf_str = str(cfg.timeframe).strip().replace("/", "-")
+        self.output_dir = _os.path.join("data", f"start_{start_str}_end_{end_str}_tf_{tf_str}")
+        _os.makedirs(self.output_dir, exist_ok=True)
 
     @staticmethod
     def _parse_timeframe(tf: str) -> Tuple[str, int]:
@@ -184,51 +194,224 @@ class MABreakoutBacktester:
         return s
 
     def run(self) -> dict:
-        close = self._load_close_series()
-        fast = close.rolling(self.cfg.fast).mean()
-        slow = close.rolling(self.cfg.slow).mean()
-        highn = close.rolling(self.cfg.brk).max()
-        lown = close.rolling(self.cfg.brk).min()
-        # 使用“前N根”的高低点进行突破判定，避免包含当前bar造成自证突破
-        highn_prev = highn.shift(1)
-        lown_prev = lown.shift(1)
-        buf = float(self.cfg.buffer)
+        """多指标确认 + 风控/止盈止损 的回测主循环（仅做多，支持分批止盈与移动止损）"""
+        # 1) 加载收盘价（OHLC 近似：用前一根与当前收盘生成高低，避免 ATR=0）
+        close = self._load_close_series().astype(float)
+        prev_close = close.shift(1)
+        high = pd.concat([close, prev_close], axis=1).max(axis=1).astype(float)
+        low = pd.concat([close, prev_close], axis=1).min(axis=1).astype(float)
 
-        # 生成信号（向量化）
-        f0 = fast.shift(1)
-        s0 = slow.shift(1)
-        buy = (f0 <= s0) & (fast > slow) & (close > highn_prev * (1.0 + buf))
-        sell = (f0 >= s0) & (fast < slow) & (close < lown_prev * (1.0 - buf))
-        signal = pd.Series("HOLD", index=close.index)
-        signal = signal.mask(buy, "BUY").mask(sell, "SELL")
+        # 2) 指标计算
+        # MACD
+        ema_fast = close.ewm(span=int(self.cfg.macd_fast), adjust=False).mean()
+        ema_slow = close.ewm(span=int(self.cfg.macd_slow), adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        macd_signal = macd_line.ewm(span=int(self.cfg.macd_signal), adjust=False).mean()
+        # 布林
+        bb_mid = close.rolling(int(self.cfg.bb_period)).mean()
+        bb_std = close.rolling(int(self.cfg.bb_period)).std(ddof=0)
+        bb_upper = bb_mid + float(self.cfg.bb_k) * bb_std
+        bb_lower = bb_mid - float(self.cfg.bb_k) * bb_std
+        # RSI（Wilder）
+        delta = close.diff()
+        up = np.where(delta > 0, delta, 0.0)
+        down = np.where(delta < 0, -delta, 0.0)
+        roll_up = pd.Series(up, index=close.index).ewm(alpha=1 / float(self.cfg.rsi_period), adjust=False).mean()
+        roll_down = pd.Series(down, index=close.index).ewm(alpha=1 / float(self.cfg.rsi_period), adjust=False).mean()
+        rs = roll_up / roll_down.replace(0, np.nan)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        # Aroon（基于窗口内 argmax/argmin 位置近似）
+        n_aroon = int(self.cfg.aroon_period)
+        argmax = close.rolling(n_aroon).apply(lambda x: float(np.argmax(x)), raw=True)
+        argmin = close.rolling(n_aroon).apply(lambda x: float(np.argmin(x)), raw=True)
+        aroon_up = (argmax + 1.0) / n_aroon * 100.0
+        aroon_down = (argmin + 1.0) / n_aroon * 100.0
+        # ATR（True Range，周期14）
+        atr_period = 14
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(int(atr_period)).mean()
 
-        # 仓位：BUY -> +1，SELL -> -1，HOLD -> 延续
-        pos = pd.Series(0.0, index=close.index)
-        pos = pos.mask(buy, 1.0).mask(sell, -1.0)
-        pos = pos.replace(0.0, np.nan).ffill().fillna(0.0)
+        # 3) 回测主循环（逐bar状态机）
+        idx = list(close.index)
+        signals, pos_list, ret_list, eq_list = [], [], [], []
+        fast_list, slow_list, hi_list, lo_list = [], [], [], []
 
-        # 收益计算
-        ret = close.pct_change().fillna(0.0)
-        gross = pos.shift(1).fillna(0.0) * ret
-        # 手续费（双边）：当仓位变化时收取一次换手成本近似；
-        turn = (pos != pos.shift(1)).astype(float)
+        _pos = 0               # 0=空，1=多
+        _entry_price = None
+        _tp1_done = False
+        _tp2_done = False
+        _remain_frac = 0.0
+        _trail_stop = None
+        _entry_high = None
+        _init_risk = None
+
         fee_rate = abs(self.cfg.fee_bps) / 10000.0
-        net = gross - turn * fee_rate
+        equity = 1.0
+        last_pos_frac = 0.0
 
-        equity = (1.0 + net).cumprod()
+        min_need = max(
+            int(self.cfg.macd_slow + self.cfg.macd_signal + 5),
+            int(self.cfg.bb_period + 5),
+            int(self.cfg.rsi_period + 5),
+            int(self.cfg.aroon_period + 1),
+            int(atr_period + 5),
+        )
+
+        for i, t in enumerate(idx):
+            c1 = float(close.iloc[i]) if pd.notna(close.iloc[i]) else None
+            c0 = float(close.iloc[i-1]) if i > 0 and pd.notna(close.iloc[i-1]) else None
+            macd1 = float(macd_line.iloc[i]) if pd.notna(macd_line.iloc[i]) else None
+            sig1 = float(macd_signal.iloc[i]) if pd.notna(macd_signal.iloc[i]) else None
+            macd0 = float(macd_line.iloc[i-1]) if i > 0 and pd.notna(macd_line.iloc[i-1]) else None
+            sig0 = float(macd_signal.iloc[i-1]) if i > 0 and pd.notna(macd_signal.iloc[i-1]) else None
+            bb_up1 = float(bb_upper.iloc[i]) if pd.notna(bb_upper.iloc[i]) else np.nan
+            bb_low1 = float(bb_lower.iloc[i]) if pd.notna(bb_lower.iloc[i]) else np.nan
+            rsi1 = float(rsi.iloc[i]) if pd.notna(rsi.iloc[i]) else None
+            a_up1 = float(aroon_up.iloc[i]) if pd.notna(aroon_up.iloc[i]) else None
+            a_dn1 = float(aroon_down.iloc[i]) if pd.notna(aroon_down.iloc[i]) else None
+            a_up0 = float(aroon_up.iloc[i-1]) if i > 0 and pd.notna(aroon_up.iloc[i-1]) else None
+            a_dn0 = float(aroon_down.iloc[i-1]) if i > 0 and pd.notna(aroon_down.iloc[i-1]) else None
+            high1 = float(high.iloc[i]) if pd.notna(high.iloc[i]) else None
+            atr1 = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else None
+
+            out_sig = "HOLD"
+            size_frac_suggest = None
+
+            if i >= (min_need - 1) and c1 is not None:
+                # 多指标确认
+                macd_cross_up = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 <= sig0) and (macd1 > sig1))
+                macd_cross_dn = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 >= sig0) and (macd1 < sig1))
+                macd_bull_ok = (macd_cross_up or (macd1 is not None and sig1 is not None and macd1 > sig1 and macd1 > 0))
+                macd_bear_ok = (macd_cross_dn or (macd1 is not None and sig1 is not None and macd1 < sig1 and macd1 < 0))
+                bb_bull_ok = (not np.isnan(bb_up1)) and (c1 > bb_up1)
+                bb_bear_ok = (not np.isnan(bb_low1)) and (c1 < bb_low1)
+                rsi_bull_ok = (rsi1 is not None) and (rsi1 >= float(self.cfg.rsi_buy))
+                rsi_bear_ok = (rsi1 is not None) and (rsi1 <= float(self.cfg.rsi_sell))
+                bear_thresh = max(float(self.cfg.aroon_buy), 100.0 - float(self.cfg.aroon_sell))
+                aroon_bull_ok = (a_up1 is not None and a_dn1 is not None) and (a_up1 >= float(self.cfg.aroon_buy)) and (a_up1 > a_dn1)
+                aroon_bear_ok = (a_up1 is not None and a_dn1 is not None) and (a_dn1 >= bear_thresh) and (a_dn1 > a_up1)
+                buy_confirms = int(macd_bull_ok) + int(bb_bull_ok) + int(rsi_bull_ok) + int(aroon_bull_ok)
+                sell_confirms = int(macd_bear_ok) + int(bb_bear_ok) + int(rsi_bear_ok) + int(aroon_bear_ok)
+                need = int(max(1, min(4, int(self.cfg.confirm_min))))
+                if buy_confirms >= need and buy_confirms > sell_confirms:
+                    out_sig = "BUY"
+                elif sell_confirms >= need and sell_confirms > buy_confirms:
+                    out_sig = "SELL"
+
+                # 止盈（仅多头）
+                tp_triggered = False
+                if _pos > 0 and _entry_price is not None:
+                    if high1 is not None:
+                        _entry_high = high1 if _entry_high is None else max(_entry_high, high1)
+                    if atr1 is not None and atr1 > 0 and _entry_high is not None:
+                        trail_cand = float(_entry_high) - 1.5 * float(atr1)
+                        _trail_stop = trail_cand if _trail_stop is None else max(_trail_stop, trail_cand)
+                    # Aroon 反转：全平
+                    aroon_rev = False
+                    if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
+                        aroon_rev = (a_up0 >= a_dn0) and (a_dn1 > a_up1)
+                    if aroon_rev and (_remain_frac is None or _remain_frac > 0):
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True
+                    # 移动止损
+                    if (not tp_triggered) and _trail_stop is not None and c1 <= float(_trail_stop):
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True
+                    # R 倍数分批止盈
+                    if (not tp_triggered) and _init_risk is not None and _init_risk > 0:
+                        r_mult = (c1 - float(_entry_price)) / float(_init_risk)
+                        if (not _tp2_done) and r_mult >= 2.0 and (_remain_frac or 0.0) > 0:
+                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp2_done = True
+                        elif (not _tp1_done) and r_mult >= 1.0 and (_remain_frac or 0.0) > 0:
+                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp1_done = True
+                    # RSI 技术止盈（部分）
+                    if (not tp_triggered) and rsi1 is not None and (rsi1 >= 80.0 or rsi1 <= 20.0):
+                        out_sig = "SELL"; size_frac_suggest = float(min(0.2, float(_remain_frac or 1.0)))
+
+                # 止损（若未触发止盈）
+                if _pos > 0 and _entry_price is not None and (size_frac_suggest is None or size_frac_suggest >= 0.999):
+                    stop_hit = None
+                    # ATR 止损
+                    if atr1 is not None and atr1 > 0:
+                        atr_stop = float(_entry_price) - 2.0 * float(atr1)
+                        if c1 <= atr_stop:
+                            stop_hit = True
+                    # 百分比止损（按BTC/ETH不同）
+                    if stop_hit is None:
+                        sym = str(self.cfg.inst).upper()
+                        pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                        stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                        if stop_pct is not None and stop_pct > 0:
+                            pct_stop = float(_entry_price) * (1.0 - float(stop_pct))
+                            if c1 <= pct_stop:
+                                stop_hit = True
+                    # 技术指标止损
+                    if stop_hit is None:
+                        macd_cross_dn2 = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 >= sig0) and (macd1 < sig1))
+                        if (not np.isnan(bb_low1) and c1 < bb_low1) or macd_cross_dn2:
+                            stop_hit = True
+                    if stop_hit:
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0)
+
+                # 状态更新（支持部分止盈）
+                if out_sig == "BUY" and _pos == 0:
+                    _pos = 1
+                    _entry_price = c1
+                    _entry_high = high1
+                    _tp1_done = False
+                    _tp2_done = False
+                    _remain_frac = 1.0
+                    _trail_stop = None
+                    # 入场时估算初始风险 R
+                    eff_stop = None
+                    if atr1 is not None and atr1 > 0:
+                        eff_stop = max(eff_stop or -1e18, float(_entry_price) - 2.0 * float(atr1))
+                    sym = str(self.cfg.inst).upper()
+                    pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                    stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                    if stop_pct is not None and stop_pct > 0:
+                        eff_stop = max(eff_stop or -1e18, float(_entry_price) * (1.0 - float(stop_pct)))
+                    _init_risk = (float(_entry_price) - eff_stop) if (eff_stop is not None and eff_stop < float(_entry_price)) else float(_entry_price) * 0.01
+                elif out_sig == "SELL" and _pos == 1:
+                    if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                        _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
+                        if _remain_frac <= 1e-6:
+                            _pos = 0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                    else:
+                        _pos = 0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+
+            # 当根结束：计算净值变化（上一根仓位 * 本根涨跌 - 换手手续费）
+            cur_pos_frac = float(_remain_frac if _pos == 1 else 0.0)
+            bar_ret = 0.0 if c0 is None or c1 is None else (c1 / c0 - 1.0)
+            gross = float(last_pos_frac) * float(bar_ret)
+            delta_pos = abs(cur_pos_frac - last_pos_frac)
+            net = gross - delta_pos * fee_rate
+            equity *= (1.0 + net)
+
+            signals.append(out_sig)
+            pos_list.append(cur_pos_frac)
+            ret_list.append(net)
+            eq_list.append(equity)
+            fast_list.append(float(macd1) if macd1 is not None and not np.isnan(macd1) else np.nan)
+            slow_list.append(float(sig1) if sig1 is not None and not np.isnan(sig1) else np.nan)
+            hi_list.append(bb_up1)
+            lo_list.append(bb_low1)
+
+            last_pos_frac = cur_pos_frac
 
         df = pd.DataFrame({
             "close": close,
-            "fast": fast,
-            "slow": slow,
-            "highN": highn,
-            "lowN": lown,
-            "highN_prev": highn_prev,
-            "lowN_prev": lown_prev,
-            "signal": signal,
-            "pos": pos,
-            "ret": net,
-            "equity": equity,
+            "fast": pd.Series(fast_list, index=close.index),
+            "slow": pd.Series(slow_list, index=close.index),
+            "highN": pd.Series(hi_list, index=close.index),
+            "lowN": pd.Series(lo_list, index=close.index),
+            "highN_prev": pd.Series(hi_list, index=close.index),
+            "lowN_prev": pd.Series(lo_list, index=close.index),
+            "signal": pd.Series(signals, index=close.index),
+            "pos": pd.Series(pos_list, index=close.index),
+            "ret": pd.Series(ret_list, index=close.index),
+            "equity": pd.Series(eq_list, index=close.index),
         })
 
         stats = self._summary_stats(df)
@@ -248,6 +431,7 @@ class MABreakoutBacktester:
             end_idx = list(df.index[ends])
             wins = 0
             trades = 0
+
             for s, e in zip(start_idx, end_idx):
                 seg_pnl = float(ret_series.loc[s:e].sum())
                 trades += 1
@@ -260,7 +444,7 @@ class MABreakoutBacktester:
 
         # 约定输出路径：data/backtest_summary.json（与 scripts/gradual_deploy.py 默认读取一致）
         try:
-            summary_path = _os.path.join("data", "backtest_summary.json")
+            summary_path = _os.path.join(self.output_dir, "backtest_summary.json")
             _os.makedirs(_os.path.dirname(summary_path), exist_ok=True)
             summary_payload = {
                 "metrics": {
@@ -300,12 +484,9 @@ class MABreakoutBacktester:
         dd = (eq / cummax - 1.0).min() if len(eq) > 0 else 0.0
         return {"final_equity": final_eq, "return_pct": (final_eq - 1.0) * 100.0, "sharpe": float(sharpe), "max_dd": float(dd)}
 
-    @staticmethod
-    def _export(df: pd.DataFrame) -> None:
-        import os
-        os.makedirs("data", exist_ok=True)
-        csv_path = "data/backtest_ma_breakout.csv"
-        svg_path = "data/backtest_ma_breakout.svg"
+    def _export(self, df: pd.DataFrame) -> None:
+        csv_path = _os.path.join(self.output_dir, "backtest_ma_breakout.csv")
+        svg_path = _os.path.join(self.output_dir, "backtest_ma_breakout.svg")
         try:
             df.to_csv(csv_path, index=True)
             logger.info("已导出回测明细CSV：{}", csv_path)

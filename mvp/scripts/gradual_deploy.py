@@ -210,6 +210,8 @@ def main():
     p_pre = sub.add_parser("preflight", help="上线前自检：OKX API、数据延迟、回测阈值")
     p_pre.add_argument("--http-admin-url", type=str, default=os.environ.get("EXEC_HTTP_ADMIN_URL"), help="HTTP 管理接口根地址，例如 http://127.0.0.1:8001")
     p_pre.add_argument("--backtest-summary", type=str, default=os.path.join("data", "backtest_summary.json"))
+    # 注意：回测模块已将产物输出到 data/start_YYYYMMDD_end_YYYYMMDD 子目录
+    # 建议在调用时通过 --backtest-summary 显式传入该子目录下的 backtest_summary.json 完整路径
     p_pre.add_argument("--min-sharpe", type=float, default=0.2)
     p_pre.add_argument("--min-winrate", type=float, default=0.5)
     p_pre.add_argument("--max-drawdown", type=float, default=0.05)

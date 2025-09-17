@@ -67,6 +67,17 @@ class SystemOrchestrator:
             self.cooldown_sec: float = float(os.getenv("MA_COOLDOWN_SEC", os.getenv("COOLDOWN_SEC", "0")))
         except Exception:
             self.cooldown_sec = 0.0
+        # —— 若在 discipline.json 中设置了按根数冷却，则覆盖为 bars * timeframe_seconds ——
+        try:
+            bars = int(getattr(self.cfg.discipline, "cooldown_bars", 0)) if hasattr(self.cfg, "discipline") else 0
+        except Exception:
+            bars = 0
+        if bars and bars > 0:
+            tf = os.getenv("MA_TIMEFRAME", "5min").strip()
+            tf_sec = self._timeframe_seconds(tf)
+            # bars * 每根bar秒数
+            self.cooldown_sec = float(bars) * float(tf_sec)
+            logger.info("按根数冷却覆盖：cooldown_bars={} timeframe={} -> cooldown_sec={}", bars, tf, self.cooldown_sec)
         # 记录各标的最近一次下单时间戳（秒）
         self._last_trade_ts: Dict[str, float] = {}
         # 虚拟持仓：按策略目标持仓记录（BUY=+1，SELL=-1，HOLD=延续），仅用于日志观测
@@ -103,6 +114,27 @@ class SystemOrchestrator:
         except Exception as e:
             logger.debug("获取最近两笔成交价失败：{}", e)
             return None, None
+
+    # ========== 工具：将时间粒度字符串换算为秒 ==========
+    def _timeframe_seconds(self, timeframe: str) -> float:
+        """支持 1m/5m/15m/30m/1h/4h/1d/1min/5min 等常见写法，无法识别时默认 60s。
+        注：只用于冷却时间 bars->秒 的换算。"""
+        if not timeframe:
+            return 60.0
+        s = timeframe.lower().strip()
+        try:
+            if s.endswith("min"):
+                return float(int(s.replace("min", "")) * 60)
+            if s.endswith("m"):
+                return float(int(s.replace("m", "")) * 60)
+            if s.endswith("h"):
+                return float(int(s.replace("h", "")) * 3600)
+            if s.endswith("d"):
+                return float(int(s.replace("d", "")) * 86400)
+        except Exception:
+            pass
+        # 默认 1 分钟
+        return 60.0
 
     # ========== 组件启动/停止 ==========
     async def start(self) -> None:
@@ -157,7 +189,26 @@ class SystemOrchestrator:
     def _get_strategy(self, inst: str) -> Any:
         """仅保留均线+突破策略"""
         if inst not in self._strategies:
-            cfg = MABreakoutConfig(
+            # —— 先计算将被 discipline 覆盖的参数 ——
+            d = getattr(self.cfg, "discipline", None)
+            atr_n_val = (d.atr_stop_loss if d is not None else float(os.getenv("MA_ATR_N", "2.0")))
+            sl_btc_val = (d.stop_loss_pct_btc if d is not None else float(os.getenv("MA_STOP_LOSS_PCT_BTC", "0.03")))
+            sl_eth_val = (d.stop_loss_pct_eth if d is not None else float(os.getenv("MA_STOP_LOSS_PCT_ETH", "0.04")))
+            tp_frac1_val = None
+            tp_frac2_val = None
+            if d is not None and isinstance(d.take_profit_split, list) and len(d.take_profit_split) >= 1:
+                try:
+                    tp_frac1_val = float(d.take_profit_split[0])
+                except Exception:
+                    tp_frac1_val = None
+            if d is not None and isinstance(d.take_profit_split, list) and len(d.take_profit_split) >= 2:
+                try:
+                    tp_frac2_val = float(d.take_profit_split[1])
+                except Exception:
+                    tp_frac2_val = None
+            trail_atr_val = (d.trailing_atr if d is not None else float(os.getenv("MA_TP_TRAIL_ATR", "1.5")))
+
+            strat_cfg = MABreakoutConfig(
                 inst_id=inst,
                 timeframe=os.getenv("MA_TIMEFRAME", "5min"),
                 fast_ma=int(os.getenv("MA_FAST", "10")),
@@ -182,8 +233,21 @@ class SystemOrchestrator:
                 aroon_buy=float(os.getenv("MA_AROON_BUY", "70")),
                 aroon_sell=float(os.getenv("MA_AROON_SELL", "30")),
                 confirm_min=int(os.getenv("MA_CONFIRM_MIN", "3")),
+                # —— 新增：止损参数（被 discipline 覆盖优先）——
+                atr_n=float(atr_n_val),  # ATR 倍数 N（止损价 = 入场价 - N * ATR）
+                stop_loss_pct_btc=float(sl_btc_val),  # BTC 固定百分比止损
+                stop_loss_pct_eth=float(sl_eth_val),  # ETH 固定百分比止损
+                # —— 新增：止盈参数（被 discipline 覆盖优先）——
+                tp_r1=float(os.getenv("MA_TP_R1", "1.0")),             # 第一级 R 倍数（达到即部分止盈）
+                tp_r2=float(os.getenv("MA_TP_R2", "2.0")),             # 第二级 R 倍数（达到即再次部分止盈）
+                tp_frac1=float(tp_frac1_val if tp_frac1_val is not None else float(os.getenv("MA_TP_FRAC1", "0.3"))),
+                tp_frac2=float(tp_frac2_val if tp_frac2_val is not None else float(os.getenv("MA_TP_FRAC2", "0.3"))),
+                tp_trail_atr_mult=float(trail_atr_val),  # 移动止损 ATR 倍数
+                rsi_tp_high=float(os.getenv("MA_RSI_TP_HIGH", "80")),   # RSI 技术止盈上阈值
+                rsi_tp_low=float(os.getenv("MA_RSI_TP_LOW", "20")),     # RSI 技术止盈下阈值
+                rsi_tp_frac=float(os.getenv("MA_RSI_TP_FRAC", "0.2")),  # RSI 技术止盈建议比例
             )
-            self._strategies[inst] = MABreakoutStrategy(cfg)
+            self._strategies[inst] = MABreakoutStrategy(strat_cfg)
         return self._strategies[inst]
 
     async def _strategy_loop(self, insts: List[str]) -> None:
@@ -247,10 +311,32 @@ class SystemOrchestrator:
 
                             # —— 使用仓位管理器计算建议手数，失败回退到 TRADE_SIZE ——
                             try:
-                                pm_size = self.pos_manager.compute_size(inst, side.lower()) if self.pos_manager else None
+                                # 提取策略建议的止损价，传递给仓位管理器做风险等权 sizing（仅 BUY 会启用）
+                                stop_px = None
+                                try:
+                                    if sig.get("sl") is not None:
+                                        stop_px = float(sig.get("sl"))
+                                except Exception:
+                                    stop_px = None
+                                pm_size = self.pos_manager.compute_size(inst, side.lower(), stop_px=stop_px) if self.pos_manager else None
                             except Exception:
                                 pm_size = None
                             used_size = pm_size if (pm_size is not None and pm_size > 0) else trade_size
+
+                            # 读取策略建议的部分止盈比例（仅 SELL 场景可能出现）
+                            size_frac = sig.get("size_frac")
+                            if side == "SELL" and size_frac is not None:
+                                try:
+                                    frac = float(size_frac)
+                                    # 仅当 0<frac<1 视为部分平仓；否则按全量/反转处理
+                                    if 0.0 < frac < 1.0:
+                                        used_size = float(used_size) * frac
+                                        # 防止过小导致无效下单
+                                        if used_size <= 0:
+                                            logger.info("[跳过下单] {} 部分平仓计算后手数无效 frac={:.4f}", inst, frac)
+                                            continue
+                                except Exception:
+                                    pass
 
                             # 生成交易信号并执行（统一组装）
                             ts = sig.get("ts")
@@ -267,6 +353,12 @@ class SystemOrchestrator:
                             if disable_sl:
                                 # 提示执行器忽略任何止损逻辑（如支持）
                                 meta["noSL"] = True
+                            # 透传部分平仓比例（仅用于审计/记录，执行侧不强制使用）
+                            try:
+                                if size_frac is not None:
+                                    meta["sizeFrac"] = float(size_frac)
+                            except Exception:
+                                pass
                             reason = sig.get("reason") or "ma_breakout"
 
                             trade_sig = TradeSignal(
@@ -281,7 +373,25 @@ class SystemOrchestrator:
                                 self._last_trade_ts[inst] = time.time()
                                 # 更新虚拟持仓并输出
                                 try:
-                                    self._virt_pos[inst] = 1.0 if side == "BUY" else -1.0
+                                    # 对于 BUY：视为建仓 -> pos = 1
+                                    if side == "BUY":
+                                        self._virt_pos[inst] = 1.0
+                                    else:  # SELL：根据 reason 与 size_frac 判断是否为部分止盈/止损
+                                        r = str(reason)
+                                        if r.startswith("takeprofit") or r.startswith("stoploss"):
+                                            try:
+                                                frac = float(size_frac) if size_frac is not None else None
+                                            except Exception:
+                                                frac = None
+                                            if frac is not None and 0.0 < frac < 1.0:
+                                                cur = float(self._virt_pos.get(inst, 1.0))
+                                                self._virt_pos[inst] = max(0.0, cur * (1.0 - frac))
+                                            else:
+                                                # 视为全平
+                                                self._virt_pos[inst] = 0.0
+                                        else:
+                                            # 其他 SELL（例如反转做空）维持原逻辑
+                                            self._virt_pos[inst] = -1.0
                                     logger.info("[虚拟持仓] {} pos={}", inst, self._virt_pos[inst])
                                 except Exception:
                                     pass
