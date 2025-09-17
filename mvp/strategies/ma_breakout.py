@@ -32,7 +32,7 @@ from utils.db import TimescaleDB
 class MABreakoutConfig:
     """策略参数配置（升级为多指标确认，保留原字段以兼容外部调用）"""
     inst_id: str = "BTC-USDT"            # 标的
-    timeframe: str = "5min"               # 时间粒度：如 1min/5min/15min
+    timeframe: str = "15min"               # 时间粒度：如 1min/5min/15min
 
     # —— 兼容旧参数（用于默认回退）——
     fast_ma: int = 10                      # 兼容：作为 MACD 快线窗口默认回退

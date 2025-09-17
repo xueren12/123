@@ -13,7 +13,7 @@ param(
     [string]$Inst = "ETH-USDT-SWAP",
     [string]$Timeframe = "5m",
     [string]$Start = "2025-01-01",
-    [string]$End = "2025-01-02",
+    [string]$End = "2025-09-02",
     [string]$Proxy = "",
     [string]$DataDir = "data"
 )

@@ -343,7 +343,17 @@ class SystemOrchestrator:
                             ord_type = str(sig.get("ord_type", "market")).lower()
                             meta = {"ordType": ord_type}
                             # 止损开关：若设置了环境变量 DISABLE_SL=1，则不附带止损参数
-                            disable_sl = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
+                            disable_sl_env = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
+                            # 回测对齐模式：强制使用市价单，TP/SL 由策略信号闭环触发，不随单挂条件单
+                            try:
+                                align_backtest = bool(getattr(self.cfg.exec, "align_backtest", False))
+                            except Exception:
+                                align_backtest = False
+                            if align_backtest:
+                                ord_type = "market"
+                                meta["ordType"] = "market"
+                            # 结合环境开关与回测对齐开关，判断是否禁用随单 SL
+                            disable_sl = disable_sl_env or align_backtest
                             # 透传策略建议止损价 -> 风控/执行可利用（slTriggerPx 或 slOrdPx）
                             if (not disable_sl) and (sig.get("sl") is not None):
                                 try:
@@ -361,8 +371,15 @@ class SystemOrchestrator:
                                 pass
                             reason = sig.get("reason") or "ma_breakout"
 
+                            # 在“回测对齐”语义下：对于止盈/止损类 SELL，改为 close 语义（执行器会为合约单自动加 reduceOnly）
+                            ts_side = side.lower()
+                            if ts_side == "sell":
+                                r = str(reason)
+                                if r.startswith("takeprofit") or r.startswith("stoploss"):
+                                    ts_side = "close"
+
                             trade_sig = TradeSignal(
-                                ts=ts, symbol=inst, side=side.lower(), price=None,
+                                ts=ts, symbol=inst, side=ts_side, price=None,
                                 size=used_size, reason=reason,
                                 meta=meta,
                             )

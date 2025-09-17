@@ -668,87 +668,54 @@ class TradeExecutor:
             # 现货 close 语义：若有持仓，则按照 side=卖出；此处简单处理，默认 close = sell
             side = "sell"
 
-        # 止盈止损参数透传
-        meta = signal.meta or {}
-        # 新增：全局禁用止盈/止损 —— 清理任何 tp/sl 字段，并标记执行器忽略止损逻辑
-        try:
-            meta["noSL"] = True
-            for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType", "tpTriggerPx", "tpOrdPx", "tpTriggerPxType"):
-                meta.pop(k, None)
-            # 防止通过 extra 透传止盈止损/附加委托
-            if isinstance(meta.get("extra"), dict):
-                extra = meta.get("extra")
-                # 去掉直接字段
-                for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType", "tpTriggerPx", "tpOrdPx", "tpTriggerPxType"):
-                    extra.pop(k, None)
-                # 去掉 attachAlgoOrds
-                extra.pop("attachAlgoOrds", None)
-                meta["extra"] = extra
-        except Exception:
-            pass
-        # 规范化止损参数：若仅提供触发价则默认以市价委托执行止损（slOrdPx=-1），并设置默认触发价类型为 last，避免与交易所规则不匹配
-        # 新增：若 meta['noSL'] 为 True，则不附带任何止损相关参数（用于“直接下单不设置止损”的场景）
-        try:
-            if bool(meta.get("noSL")):
-                # 清理可能存在的止损字段，避免误传导致交易所侧校验（51053等）
-                for k in ("slTriggerPx", "slOrdPx", "slTriggerPxType"):
-                    if k in meta:
-                        meta.pop(k, None)
-            else:
+        # 止盈止损参数透传（改为尊重策略侧参数；若 align_no_sl 则跳过）
+        # 仅当未设置 noSL 时，才考虑透传 sl/tp 参数
+        if not align_no_sl:
+            try:
                 if meta.get("slTriggerPx") is not None:
                     try:
-                        # 将触发价规范为字符串数字
                         meta["slTriggerPx"] = str(float(meta.get("slTriggerPx")))
                     except Exception:
-                        # 若无法解析，保持原样，交由下游处理
                         meta["slTriggerPx"] = str(meta.get("slTriggerPx"))
-                    # 未提供 slOrdPx 时，强制使用市价止损
                     if not meta.get("slOrdPx"):
-                        meta["slOrdPx"] = "-1"  # 市价触发
+                        meta["slOrdPx"] = "-1"
                     else:
                         meta["slOrdPx"] = str(meta.get("slOrdPx"))
-                    # 默认触发价类型为 last
                     if not meta.get("slTriggerPxType"):
                         meta["slTriggerPxType"] = "last"
-                    # === 方向性校验与微调 ===
-                    sl_str = meta.get("slTriggerPx")
-                    if sl_str is not None:
-                        # 以字符串形式保存，但这里需要数值参与校验
-                        sl_val = float(sl_str)
-                        # 估算主单的“预期成交价”
-                        # - 市价单：BUY 近似按最优卖价(ask)成交，SELL 近似按最优买价(bid)成交
-                        # - 限价单：用用户给定的 price
-                        expected_px: Optional[float] = None
-                        # 再次获取市场状态（包含 best_bid/best_ask），若外部未注入 provider 则使用默认实现
-                        mkt = (self._market_state_provider(signal.symbol, p0) if self._market_state_provider else self._default_market_state(signal.symbol, p0))
-                        if ord_type == "market":
-                            if side == "buy":
-                                expected_px = (mkt.best_ask if hasattr(mkt, "best_ask") else None) or (mkt.mid_price if hasattr(mkt, "mid_price") else None) or p0
-                            else:
-                                expected_px = (mkt.best_bid if hasattr(mkt, "best_bid") else None) or (mkt.mid_price if hasattr(mkt, "mid_price") else None) or p0
-                        else:
-                            # 限价单直接使用下单价
-                            expected_px = float(signal.price) if signal.price is not None else p0
-                        # 若仍拿不到参考价，则跳过校验
-                        if expected_px is not None:
-                            # 设定一个极小的相对偏移（0.001%），仅用于满足方向性不等式
-                            eps = max(1e-8, float(expected_px) * 1e-6)
-                            if side == "buy":
-                                # BUY：止损应低于主单价
-                                if sl_val >= float(expected_px):
-                                    adj = float(expected_px) * (1.0 - 1e-6)
-                                    # 仅在原值不满足时才调整，尽量保持用户原始意图
-                                    sl_val = min(sl_val, adj)
-                            else:
-                                # SELL：止损应高于主单价
-                                if sl_val <= float(expected_px):
-                                    adj = float(expected_px) * (1.0 + 1e-6)
-                                    sl_val = max(sl_val, adj)
-                            # 回写为字符串，保持与其余字段类型一致
-                            meta["slTriggerPx"] = f"{sl_val}"
-        except Exception as _:
-            # 若校验过程出现异常，不影响下单主流程
+            except Exception:
+                pass
+        else:
+            # 明确清理 tp/sl 字段，避免误传
+            for k in ("tpTriggerPx","tpOrdPx","slTriggerPx","slOrdPx","tpTriggerPxType","slTriggerPxType"):
+                if k in meta:
+                    try:
+                        del meta[k]
+                    except Exception:
+                        pass
+
+        # 实盘：调用 OKX REST 下单
+        assert self.client is not None, "实盘模式需要 OKXRESTClient"
+        side = signal.side
+        if side == "close":
+            # 合约 close 语义：默认按 reduceOnly 方式减仓；若为现货则等同于卖出
+            side = "sell"
+        # 组装 extra，保留策略传入的 extra 字段，并在 close 时默认加上 reduceOnly=True（对合约有效）
+        _extra = {}
+        try:
+            if isinstance((meta or {}).get("extra"), dict):
+                _extra.update(meta.get("extra") or {})
+        except Exception:
             pass
+        if signal.side == "close":
+            # 仅对合约/永续类产品添加 reduceOnly，避免现货接口报无效字段
+            try:
+                inst = str(signal.symbol)
+                is_derivative = (len(inst.split("-")) >= 3) or inst.endswith("-SWAP")
+            except Exception:
+                is_derivative = False
+            if is_derivative:
+                _extra.setdefault("reduceOnly", True)
 
         resp: OKXResponse = self.client.place_order(
             inst_id=signal.symbol,
@@ -759,24 +726,26 @@ class TradeExecutor:
             td_mode=meta.get("tdMode"),
             tgt_ccy=meta.get("tgtCcy"),
             cl_ord_id=meta.get("clOrdId"),
-            tp_trigger_px=None,  # 强制不发送止盈
-            tp_ord_px=None,
-            sl_trigger_px=None,  # 强制不发送止损
-            sl_ord_px=None,
-            tp_trigger_px_type=None,
-            sl_trigger_px_type=None,
-            extra=meta.get("extra"),
+            # 透传策略侧止盈/止损参数（OKX 将自动组装为 attachAlgoOrds）
+            tp_trigger_px=(str(meta.get("tpTriggerPx")) if meta.get("tpTriggerPx") is not None else None),
+            tp_ord_px=(str(meta.get("tpOrdPx")) if meta.get("tpOrdPx") is not None else None),
+            sl_trigger_px=(str(meta.get("slTriggerPx")) if meta.get("slTriggerPx") is not None else None),
+            sl_ord_px=(str(meta.get("slOrdPx")) if meta.get("slOrdPx") is not None else None),
+            tp_trigger_px_type=meta.get("tpTriggerPxType"),
+            sl_trigger_px_type=meta.get("slTriggerPxType"),
+            extra=_extra,
         )
 
         order_id = None
         if resp.ok and isinstance(resp.data, list) and resp.data:
             order_id = resp.data[0].get("ordId") or resp.data[0].get("algoId")
 
-        # 写日志
+        # 写日志（标记是否为回测对齐模式 noSL）
         self._append_log({
             "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": side,
             "price": signal.price, "size": signal.size, "reason": signal.reason, "ok": resp.ok,
             "order_id": order_id, "exchange_code": resp.code, "exchange_msg": resp.msg, "raw": json_trunc(resp.raw),
+            "align_no_sl": align_no_sl,
         })
 
         # 审计：结果

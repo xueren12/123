@@ -128,6 +128,7 @@ class ExecConfig:
     - daily_max_loss_pct: 单日最大亏损百分比（超过则暂停）
     - single_trade_max_loss_pct: 单笔最大亏损百分比（超过则暂停）
     - risk_notional_usd: 用于将百分比变化近似折算为单笔USD损益名义规模
+    - align_backtest: 回测对齐模式（强制市价单、策略闭环触发，不随单挂TP/SL）
     """
     mode: str = os.getenv("EXEC_MODE", "mock")  # mock / real / paused
     control_file: str = os.getenv("EXEC_CONTROL_FILE", os.path.join("data", "exec_switch.json"))
@@ -138,6 +139,8 @@ class ExecConfig:
     daily_max_loss_pct: float = float(os.getenv("DAILY_MAX_LOSS_PCT", "0.03"))  # 3%
     single_trade_max_loss_pct: float = float(os.getenv("SINGLE_TRADE_MAX_LOSS_PCT", "0.01"))  # 1%
     risk_notional_usd: float = float(os.getenv("RISK_NOTIONAL_USD", "100"))
+    # 新增：回测对齐模式开关（1=开启，对齐 ma_backtest 逻辑：仅用市价单，TP/SL 由策略信号自行触发）
+    align_backtest: bool = os.getenv("EXEC_ALIGN_BACKTEST", "0") == "1"
 
 
 # 新增：风控规则配置

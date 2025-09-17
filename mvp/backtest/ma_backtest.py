@@ -62,6 +62,13 @@ class MABacktestConfig:
     buffer: float = 0.0
     # 成本与输出
     fee_bps: float = 0.0  # 双边手续费，单位: bp（基点）。例如 2 表示 0.02%
+    slip_bps: float = 0.0  # 新增：滑点/点差成本，单位: bp（基点），按换手额收取
+    # ===== 合约交易相关参数 =====
+    leverage: float = 10              # 杠杆倍数（仅做多方向），>=1
+    funding_bps_8h: float = 0.0        # 资金费率：每8小时的bp，可为负表示收取资金费
+    mmr_bps: float = 50.0              # 维持保证金率（bp），默认0.50%
+    liq_penalty_bps: float = 10.0      # 强平附加惩罚（bp）
+    # ==========================
     stop_loss_pct: Optional[float] = None  # 可选：对称止损百分比（仅记录，不强制执行）
     plot: bool = True
     # 数据来源与CSV路径
@@ -249,9 +256,18 @@ class MABreakoutBacktester:
         _init_risk = None
 
         fee_rate = abs(self.cfg.fee_bps) / 10000.0
+        slip_rate = abs(self.cfg.slip_bps) / 10000.0  # 新增：滑点按换手额收取
+        cost_rate = fee_rate + slip_rate  # 总成本率 = 手续费 + 滑点
         equity = 1.0
         last_pos_frac = 0.0
-
+        # ===== 合约交易：杠杆/资金费/强平参数（每bar计提） =====
+        L = max(1.0, float(self.cfg.leverage))  # 杠杆倍数，最小为1
+        _, step_secs = self._parse_timeframe(self.cfg.timeframe)  # 每bar秒数
+        # 资金费换算：传入为每8小时bp -> 每秒费率 -> 乘以bar秒数得到每bar费率
+        funding_rate_bar = (float(self.cfg.funding_bps_8h) / 10000.0) / (8.0 * 3600.0) * float(step_secs)
+        mmr_rate = float(self.cfg.mmr_bps) / 10000.0  # 维持保证金率（比例）
+        liq_pen = float(self.cfg.liq_penalty_bps) / 10000.0  # 强平惩罚（按权益比例扣减）
+        # ====================================================
         min_need = max(
             int(self.cfg.macd_slow + self.cfg.macd_signal + 5),
             int(self.cfg.bb_period + 5),
@@ -384,9 +400,28 @@ class MABreakoutBacktester:
             # 当根结束：计算净值变化（上一根仓位 * 本根涨跌 - 换手手续费）
             cur_pos_frac = float(_remain_frac if _pos == 1 else 0.0)
             bar_ret = 0.0 if c0 is None or c1 is None else (c1 / c0 - 1.0)
-            gross = float(last_pos_frac) * float(bar_ret)
-            delta_pos = abs(cur_pos_frac - last_pos_frac)
-            net = gross - delta_pos * fee_rate
+            # ===== 基于合约的收益、成本与资金费 =====
+            IM = float(last_pos_frac)                                            # 初始保证金占比（上一根）
+            gross = float(last_pos_frac) * float(L) * float(bar_ret)             # 杠杆放大的毛收益（占比）
+            # 先按策略意图计算换手，再根据是否强平做调整
+            delta_pos_pre = abs(cur_pos_frac - last_pos_frac)
+            cost_turn_pre = delta_pos_pre * cost_rate * float(L)                 # 成交成本（按名义额，即乘以L）
+            fund_cost = float(last_pos_frac) * float(L) * float(funding_rate_bar)  # 资金费（正为支付，负为收取）
+            MB_pre = IM + gross - fund_cost - cost_turn_pre                       # 预估保证金余额（占比）
+            MM = IM * float(L) * float(mmr_rate)                                  # 维持保证金占比
+            forced_liq = (IM > 0.0) and (MB_pre <= MM)
+            if forced_liq:
+                # 若触发强平：按强制平仓到0仓位计算最终成本，并施加额外惩罚
+                cur_pos_frac = 0.0
+                delta_pos = abs(cur_pos_frac - last_pos_frac)
+                cost_turn = delta_pos * cost_rate * float(L)
+                MB = IM + gross - fund_cost - cost_turn
+                net = (MB - IM) - float(liq_pen)
+                _pos = 0; _remain_frac = 0.0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+            else:
+                delta_pos = delta_pos_pre
+                cost_turn = cost_turn_pre
+                net = gross - cost_turn - fund_cost
             equity *= (1.0 + net)
 
             signals.append(out_sig)
@@ -469,16 +504,34 @@ class MABreakoutBacktester:
 
         return {"df": df, "stats": stats}
 
-    @staticmethod
-    def _summary_stats(df: pd.DataFrame) -> dict:
+    def _summary_stats(self, df: pd.DataFrame) -> dict:
+        """统计汇总：
+        - 夏普改为按真实bar间隔年化：以索引时间差的中位数估算每bar秒数
+        - 年化收益=bar平均收益*年化bar数；年化波动=bar标准差*sqrt(年化bar数)
+        - 风险自由利率默认0
+        """
         eq = df["equity"].dropna()
         if eq.empty:
             return {"final_equity": 1.0, "return_pct": 0.0, "sharpe": 0.0, "max_dd": 0.0}
         final_eq = float(eq.iloc[-1])
         ret = df["ret"].fillna(0.0)
-        ann_fac = 365 * 24 * 60  # 以分钟为单位近似年化（保守）
-        mu = ret.mean() * ann_fac
-        sigma = ret.std(ddof=0) * np.sqrt(ann_fac)
+        # 推断每bar秒数（若失败则回退到timeframe解析结果）
+        step_secs = None
+        try:
+            idx = df.index
+            if hasattr(idx, "to_series"):
+                dts = idx.to_series().diff().dt.total_seconds().dropna()
+                if len(dts) > 0:
+                    step_secs = float(dts.median())
+        except Exception:
+            step_secs = None
+        if step_secs is None or not np.isfinite(step_secs) or step_secs <= 0:
+            # 回退：使用配置的timeframe估算
+            _, step_secs = self._parse_timeframe(self.cfg.timeframe)
+        # 年化bar数（按加密市场7x24）：365天 * 24小时 * 3600秒 / 每bar秒数
+        bars_per_year = (365.0 * 24.0 * 3600.0) / float(step_secs)
+        mu = ret.mean() * bars_per_year
+        sigma = ret.std(ddof=0) * np.sqrt(bars_per_year)
         sharpe = (mu / sigma) if sigma > 1e-12 else 0.0
         cummax = eq.cummax()
         dd = (eq / cummax - 1.0).min() if len(eq) > 0 else 0.0
@@ -525,6 +578,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--brk", type=int, default=20, help="兼容旧参数：突破回看窗口（映射为布林带窗口）")
     p.add_argument("--buffer", type=float, default=0.0, help="兼容旧参数：突破缓冲比例（不再使用）")
     p.add_argument("--fee_bps", type=float, default=0.0, help="双边手续费，基点，例如 2=0.02%")
+    p.add_argument("--slip_bps", type=float, default=0.0, help="滑点/点差成本，基点，例如 2=0.02%")
+    # ===== 合约交易相关参数 =====
+    p.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数（仅做多方向），>=1")
+    p.add_argument("--funding_bps_8h", type=float, default=0.0, help="资金费率：每8小时的bp，可为负表示收取资金费")
+    p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%")
+    p.add_argument("--liq_penalty_bps", type=float, default=10.0, help="强平附加惩罚（bp）")
+    # ==========================
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")
     p.add_argument("--plot", type=int, default=1, help="是否导出SVG图：1是 0否")
     # 新策略参数（若提供则覆盖旧参数所映射的默认值）
@@ -588,6 +648,13 @@ if __name__ == "__main__":
         brk=max(2, int(args.brk)),
         buffer=float(args.buffer),
         fee_bps=float(args.fee_bps),
+        slip_bps=float(args.slip_bps),
+        # ===== 合约参数传入 =====
+        leverage=float(args.leverage),
+        funding_bps_8h=float(args.funding_bps_8h),
+        mmr_bps=float(args.mmr_bps),
+        liq_penalty_bps=float(args.liq_penalty_bps),
+        # ======================
         stop_loss_pct=(float(args.sl_pct) if args.sl_pct is not None else None),
         plot=bool(int(args.plot)),
         source=str(args.source),
