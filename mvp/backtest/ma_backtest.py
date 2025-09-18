@@ -8,7 +8,7 @@ K线驱动的均线+突破策略回测（独立模块）
 - 采用简单持仓规则：
   - BUY -> 持仓 = +1，SELL -> 持仓 = -1，HOLD -> 持仓沿用上一根；
 - 收益计算：ret = pos.shift(1) * close.pct_change()，可选扣除双边手续费；
-- 输出：回测摘要、CSV（data/backtest_ma_breakout.csv）、SVG 图（data/backtest_ma_breakout.svg）。
+- 输出：回测摘要、CSV（data/backtest_multi_indicator.csv）、SVG 图（data/backtest_multi_indicator.svg）。
 
 用法示例（PowerShell）：
   # 从数据库读取（默认）
@@ -541,8 +541,8 @@ class MABreakoutBacktester:
         return {"final_equity": final_eq, "return_pct": (final_eq - 1.0) * 100.0, "sharpe": float(sharpe), "max_dd": float(dd)}
 
     def _export(self, df: pd.DataFrame) -> None:
-        csv_path = _os.path.join(self.output_dir, "backtest_ma_breakout.csv")
-        svg_path = _os.path.join(self.output_dir, "backtest_ma_breakout.svg")
+        csv_path = _os.path.join(self.output_dir, "backtest_multi_indicator.csv")
+        svg_path = _os.path.join(self.output_dir, "backtest_multi_indicator.svg")
         try:
             df.to_csv(csv_path, index=True)
             logger.info("已导出回测明细CSV：{}", csv_path)
@@ -557,7 +557,7 @@ class MABreakoutBacktester:
             df[["close"]].plot(ax=ax1, color="tab:blue", label="Close")
             ax2 = ax1.twinx()
             df[["equity"]].plot(ax=ax2, color="tab:green", label="Equity")
-            ax1.set_title("MA+Breakout Backtest")
+            ax1.set_title("Multi-Indicator Backtest")
             ax1.set_xlabel("Time (UTC)")
             ax1.set_ylabel("Price")
             ax2.set_ylabel("Equity")
@@ -570,7 +570,7 @@ class MABreakoutBacktester:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MA+Breakout 策略回测（K线驱动，已升级为多指标确认）")
+    p = argparse.ArgumentParser(description="多指标确认策略回测（K线驱动）")
     p.add_argument("--inst", required=True, help="交易对，如 BTC-USDT")
     p.add_argument("--start", required=True, help="起始时间，ISO或日期，如 2025-01-01")
     p.add_argument("--end", required=True, help="结束时间，ISO或日期，如 2025-01-07")

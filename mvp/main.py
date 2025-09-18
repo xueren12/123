@@ -32,7 +32,7 @@ from utils.config import AppConfig
 from utils.okx_ws_collector import OKXWSCollector
 from utils.monitor import RealTimeMonitor
 from utils.db import TimescaleDB
-from strategies.ma_breakout import MABreakoutStrategy, MABreakoutConfig
+from strategies.multi_indicator import MABreakoutStrategy, MABreakoutConfig
 from executor.trade_executor import TradeExecutor, TradeSignal
 from models.ai_advisor import AIAdvisor, build_payload
 from utils.position import PositionManager  # 引入仓位管理器
@@ -209,43 +209,19 @@ class SystemOrchestrator:
             trail_atr_val = (d.trailing_atr if d is not None else float(os.getenv("MA_TP_TRAIL_ATR", "1.5")))
 
             strat_cfg = MABreakoutConfig(
-                inst_id=inst,
-                timeframe=os.getenv("MA_TIMEFRAME", "5min"),
-                fast_ma=int(os.getenv("MA_FAST", "10")),
-                slow_ma=int(os.getenv("MA_SLOW", "30")),
-                breakout_lookback=int(os.getenv("MA_BREAKOUT_N", "20")),
-                breakout_buffer_pct=float(os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
-                lookback_bars=int(os.getenv("MA_LOOKBACK_BARS", "300")),
-                prefer_trades_price=(os.getenv("MA_PREFER_TRADES", "1") == "1"),
-                poll_sec=float(os.getenv("MA_POLL_SEC", "60.0")),
-                order_type=os.getenv("MA_ORDER_TYPE", "market").lower(),
-                stop_loss_pct=(float(os.getenv("MA_STOP_LOSS_PCT", "0.005")) if os.getenv("MA_STOP_LOSS_PCT", "").strip() != "" else None),
-                # —— 新增：多指标参数（可通过环境变量覆盖）——
-                macd_fast=int(os.getenv("MA_MACD_FAST", os.getenv("MA_FAST", "12"))),   # 若未设置则回退到 MA_FAST 或默认 12
-                macd_slow=int(os.getenv("MA_MACD_SLOW", os.getenv("MA_SLOW", "26"))),   # 若未设置则回退到 MA_SLOW 或默认 26
-                macd_signal=int(os.getenv("MA_MACD_SIGNAL", "9")),
-                bb_period=int(os.getenv("MA_BB_PERIOD", os.getenv("MA_BREAKOUT_N", "20"))),
-                bb_k=float(os.getenv("MA_BB_K", "2.0")),
-                rsi_period=int(os.getenv("MA_RSI_PERIOD", "14")),
-                rsi_buy=float(os.getenv("MA_RSI_BUY", "55")),
-                rsi_sell=float(os.getenv("MA_RSI_SELL", "45")),
-                aroon_period=int(os.getenv("MA_AROON_PERIOD", "25")),
-                aroon_buy=float(os.getenv("MA_AROON_BUY", "70")),
-                aroon_sell=float(os.getenv("MA_AROON_SELL", "30")),
-                confirm_min=int(os.getenv("MA_CONFIRM_MIN", "3")),
-                # —— 新增：止损参数（被 discipline 覆盖优先）——
-                atr_n=float(atr_n_val),  # ATR 倍数 N（止损价 = 入场价 - N * ATR）
-                stop_loss_pct_btc=float(sl_btc_val),  # BTC 固定百分比止损
-                stop_loss_pct_eth=float(sl_eth_val),  # ETH 固定百分比止损
-                # —— 新增：止盈参数（被 discipline 覆盖优先）——
-                tp_r1=float(os.getenv("MA_TP_R1", "1.0")),             # 第一级 R 倍数（达到即部分止盈）
-                tp_r2=float(os.getenv("MA_TP_R2", "2.0")),             # 第二级 R 倍数（达到即再次部分止盈）
-                tp_frac1=float(tp_frac1_val if tp_frac1_val is not None else float(os.getenv("MA_TP_FRAC1", "0.3"))),
-                tp_frac2=float(tp_frac2_val if tp_frac2_val is not None else float(os.getenv("MA_TP_FRAC2", "0.3"))),
-                tp_trail_atr_mult=float(trail_atr_val),  # 移动止损 ATR 倍数
-                rsi_tp_high=float(os.getenv("MA_RSI_TP_HIGH", "80")),   # RSI 技术止盈上阈值
-                rsi_tp_low=float(os.getenv("MA_RSI_TP_LOW", "20")),     # RSI 技术止盈下阈值
-                rsi_tp_frac=float(os.getenv("MA_RSI_TP_FRAC", "0.2")),  # RSI 技术止盈建议比例
+                inst=inst,
+                # 优先读取新命名（MI_*），回退到旧命名（MA_*），不影响现有部署
+                fast_ma=int(os.getenv("MI_FAST") or os.getenv("MA_FAST", "10")),
+                slow_ma=int(os.getenv("MI_SLOW") or os.getenv("MA_SLOW", "30")),
+                breakout_lookback=int(os.getenv("MI_LOOKBACK") or os.getenv("MA_BREAKOUT_N", "20")),
+                breakout_buffer_pct=float(os.getenv("MI_BUFFER") or os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
+                # BB 周期：优先 MI_BB_PERIOD -> MA_BB_PERIOD -> MI_LOOKBACK -> MA_BREAKOUT_N，保证有值
+                bb_period=int(os.getenv("MI_BB_PERIOD") or os.getenv("MA_BB_PERIOD") or os.getenv("MI_LOOKBACK") or os.getenv("MA_BREAKOUT_N", "20")),
+                macd_fast=int(os.getenv("MACD_FAST", "12")),
+                macd_slow=int(os.getenv("MACD_SLOW", "26")),
+                macd_signal=int(os.getenv("MACD_SIGNAL", "9")),
+                rsi_period=int(os.getenv("RSI_PERIOD", "14")),
+                aroon_period=int(os.getenv("AROON_PERIOD", "14")),
             )
             self._strategies[inst] = MABreakoutStrategy(strat_cfg)
         return self._strategies[inst]
@@ -255,7 +231,7 @@ class SystemOrchestrator:
         trade_size = float(os.getenv("TRADE_SIZE", "0.001"))
         # 根据策略类型确定轮询周期（中低频策略建议使用分钟级节奏）
         poll_sec = max(0.5, float(os.getenv("MA_POLL_SEC", "60.0")))
-        logger.info("策略循环启动：trade_size={} poll={}s type={} cooldown={}s", trade_size, poll_sec, "ma_breakout", self.cooldown_sec)
+        logger.info("策略循环启动：trade_size={} poll={}s type={} cooldown={}s", trade_size, poll_sec, "multi_indicator", self.cooldown_sec)
         try:
             while not self.stop_event.is_set():
                 loop_start = time.time()
@@ -369,7 +345,7 @@ class SystemOrchestrator:
                                     meta["sizeFrac"] = float(size_frac)
                             except Exception:
                                 pass
-                            reason = sig.get("reason") or "ma_breakout"
+                            reason = sig.get("reason") or "multi_indicator"
 
                             # 在“回测对齐”语义下：对于止盈/止损类 SELL，改为 close 语义（执行器会为合约单自动加 reduceOnly）
                             ts_side = side.lower()

@@ -8,7 +8,7 @@
 - 输出字段保持兼容：
   - fast/slow 映射为 MACD 线与信号线；
   - brk_high/brk_low 映射为布林带上轨/下轨；
-  - reason 字段保留为 "ma_breakout" 以兼容外部透传逻辑（尽管策略已更换为多指标确认）。
+  - 对外 reason 字段默认为 "multi_indicator"（保留对历史数据中旧值 "ma_breakout" 的兼容读取，但不再作为默认产出）。
 
 说明：
 - 本策略为“计算信号”组件，不直接下单。实盘由 main.SystemOrchestrator 调用并交由 TradeExecutor 统一执行与风控。
@@ -209,7 +209,8 @@ class MABreakoutStrategy:
           'signal': 'BUY'|'SELL'|'HOLD',
           'close': float, 'fast': float, 'slow': float,
           'brk_high': float, 'brk_low': float,
-          'reason': 'ma_breakout'|'stoploss_*', 'sl': Optional[float], 'ord_type': 'market'|'limit'
+          # 产出信号结构示例（供调用方参考）：{'ts': datetime, 'side': 'BUY'|'SELL'|'HOLD', 'price': float,
+          #  'reason': 'multi_indicator'|'stoploss_*', 'sl': Optional[float], 'ord_type': 'market'|'limit'
         }
         说明：本策略中 fast/slow 分别为 MACD 线与信号线，brk_high/brk_low 为布林带上/下轨；
         若数据不足则返回 None。
@@ -332,7 +333,7 @@ class MABreakoutStrategy:
         else:
             base_sig = "HOLD"
 
-        reason = "ma_breakout"
+        reason = "multi_indicator"
         out_sig = base_sig
         size_frac_suggest: Optional[float] = None  # 建议的部分平仓比例（仅在 SELL 且部分平仓时给出）
 

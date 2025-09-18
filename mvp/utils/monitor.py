@@ -18,7 +18,7 @@
 
 注意：
 - 价格来源：trades 表最新一条记录；盘口来源：orderbook 表最新一条记录
-- 策略信号：调用 strategies.ma_breakout.MABreakoutStrategy 的 compute_signal（DB 模式）
+- 策略信号：调用 strategies.multi_indicator.MABreakoutStrategy 的 compute_signal（DB 模式）
 - 如需 Web UI，可将 AppConfig.monitor.use_web_ui 置为 True，当前占位（后续可接 FastAPI + SSE）
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ from loguru import logger
 
 from utils.config import AppConfig
 from utils.db import TimescaleDB
-from strategies.ma_breakout import MABreakoutStrategy, MABreakoutConfig
+from strategies.multi_indicator import MABreakoutStrategy, MABreakoutConfig
 
 # 可选：Telegram/Slack SDK（按需导入，避免硬依赖）
 try:
@@ -208,42 +208,42 @@ class RealTimeMonitor:
         if inst not in self._ma_strategies:
             cfg = MABreakoutConfig(
                 inst_id=inst,
-                timeframe=os.getenv("MA_TIMEFRAME", "5min"),
-                fast_ma=int(os.getenv("MA_FAST", "10")),
-                slow_ma=int(os.getenv("MA_SLOW", "30")),
-                breakout_lookback=int(os.getenv("MA_BREAKOUT_N", "20")),
-                breakout_buffer_pct=float(os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
-                lookback_bars=int(os.getenv("MA_LOOKBACK_BARS", "300")),
-                prefer_trades_price=(os.getenv("MA_PREFER_TRADES", "1") == "1"),
-                poll_sec=float(os.getenv("MA_POLL_SEC", "60.0")),
-                order_type=os.getenv("MA_ORDER_TYPE", "market").lower(),
-                stop_loss_pct=(float(os.getenv("MA_STOP_LOSS_PCT", "0.005")) if os.getenv("MA_STOP_LOSS_PCT", "").strip() != "" else None),
+                timeframe=os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min"),
+                fast_ma=int(os.getenv("MI_FAST") or os.getenv("MA_FAST", "10")),
+                slow_ma=int(os.getenv("MI_SLOW") or os.getenv("MA_SLOW", "30")),
+                breakout_lookback=int(os.getenv("MI_LOOKBACK") or os.getenv("MA_BREAKOUT_N", "20")),
+                breakout_buffer_pct=float(os.getenv("MI_BUFFER") or os.getenv("MA_BREAKOUT_BUFFER", "0.0")),
+                lookback_bars=int(os.getenv("MI_LOOKBACK_BARS") or os.getenv("MA_LOOKBACK_BARS", "300")),
+                prefer_trades_price=((os.getenv("MI_PREFER_TRADES") or os.getenv("MA_PREFER_TRADES", "1")) == "1"),
+                poll_sec=float(os.getenv("MI_POLL_SEC") or os.getenv("MA_POLL_SEC", "60.0")),
+                order_type=(os.getenv("MI_ORDER_TYPE") or os.getenv("MA_ORDER_TYPE", "market")).lower(),
+                stop_loss_pct=(float(os.getenv("MI_STOP_LOSS_PCT") or os.getenv("MA_STOP_LOSS_PCT", "0.005")) if (os.getenv("MI_STOP_LOSS_PCT") or os.getenv("MA_STOP_LOSS_PCT", "")).strip() != "" else None),
                 # —— 新增：多指标参数（可通过环境变量覆盖）——
-                macd_fast=int(os.getenv("MA_MACD_FAST", os.getenv("MA_FAST", "12"))),
-                macd_slow=int(os.getenv("MA_MACD_SLOW", os.getenv("MA_SLOW", "26"))),
-                macd_signal=int(os.getenv("MA_MACD_SIGNAL", "9")),
-                bb_period=int(os.getenv("MA_BB_PERIOD", os.getenv("MA_BREAKOUT_N", "20"))),
-                bb_k=float(os.getenv("MA_BB_K", "2.0")),
-                rsi_period=int(os.getenv("MA_RSI_PERIOD", "14")),
-                rsi_buy=float(os.getenv("MA_RSI_BUY", "55")),
-                rsi_sell=float(os.getenv("MA_RSI_SELL", "45")),
-                aroon_period=int(os.getenv("MA_AROON_PERIOD", "25")),
-                aroon_buy=float(os.getenv("MA_AROON_BUY", "70")),
-                aroon_sell=float(os.getenv("MA_AROON_SELL", "30")),
-                confirm_min=int(os.getenv("MA_CONFIRM_MIN", "3")),
+                macd_fast=int(os.getenv("MACD_FAST") or os.getenv("MA_MACD_FAST") or os.getenv("MA_FAST", "12")),
+                macd_slow=int(os.getenv("MACD_SLOW") or os.getenv("MA_MACD_SLOW") or os.getenv("MA_SLOW", "26")),
+                macd_signal=int(os.getenv("MACD_SIGNAL") or os.getenv("MA_MACD_SIGNAL", "9")),
+                bb_period=int(os.getenv("MI_BB_PERIOD") or os.getenv("MA_BB_PERIOD") or os.getenv("MI_LOOKBACK") or os.getenv("MA_BREAKOUT_N", "20")),
+                bb_k=float(os.getenv("MI_BB_K") or os.getenv("MA_BB_K", "2.0")),
+                rsi_period=int(os.getenv("RSI_PERIOD") or os.getenv("MA_RSI_PERIOD", "14")),
+                rsi_buy=float(os.getenv("RSI_BUY") or os.getenv("MA_RSI_BUY", "55")),
+                rsi_sell=float(os.getenv("RSI_SELL") or os.getenv("MA_RSI_SELL", "45")),
+                aroon_period=int(os.getenv("AROON_PERIOD") or os.getenv("MA_AROON_PERIOD", "25")),
+                aroon_buy=float(os.getenv("AROON_BUY") or os.getenv("MA_AROON_BUY", "70")),
+                aroon_sell=float(os.getenv("AROON_SELL") or os.getenv("MA_AROON_SELL", "30")),
+                confirm_min=int(os.getenv("MI_CONFIRM_MIN") or os.getenv("MA_CONFIRM_MIN", "3")),
                 # —— 新增：止损参数（可通过环境变量覆盖）——
-                atr_n=float(os.getenv("MA_ATR_N", "2.0")),  # ATR 倍数 N（止损价 = 入场价 - N * ATR）
-                stop_loss_pct_btc=float(os.getenv("MA_STOP_LOSS_PCT_BTC", "0.03")),  # BTC 固定百分比止损
-                stop_loss_pct_eth=float(os.getenv("MA_STOP_LOSS_PCT_ETH", "0.04")),  # ETH 固定百分比止损
+                atr_n=float(os.getenv("ATR_N") or os.getenv("MA_ATR_N", "2.0")),  # ATR 倍数 N
+                stop_loss_pct_btc=float(os.getenv("STOP_LOSS_PCT_BTC") or os.getenv("MA_STOP_LOSS_PCT_BTC", "0.03")),
+                stop_loss_pct_eth=float(os.getenv("STOP_LOSS_PCT_ETH") or os.getenv("MA_STOP_LOSS_PCT_ETH", "0.04")),
                 # —— 新增：止盈参数（可通过环境变量覆盖）——
-                tp_r1=float(os.getenv("MA_TP_R1", "1.0")),             # 第一级 R 倍数（达到即部分止盈）
-                tp_r2=float(os.getenv("MA_TP_R2", "2.0")),             # 第二级 R 倍数（达到即再次部分止盈）
-                tp_frac1=float(os.getenv("MA_TP_FRAC1", "0.3")),       # 第一级止盈平掉比例
-                tp_frac2=float(os.getenv("MA_TP_FRAC2", "0.3")),       # 第二级止盈再平掉比例
-                tp_trail_atr_mult=float(os.getenv("MA_TP_TRAIL_ATR", "1.5")),  # 移动止损 ATR 倍数
-                rsi_tp_high=float(os.getenv("MA_RSI_TP_HIGH", "80")),   # RSI 技术止盈上阈值
-                rsi_tp_low=float(os.getenv("MA_RSI_TP_LOW", "20")),     # RSI 技术止盈下阈值
-                rsi_tp_frac=float(os.getenv("MA_RSI_TP_FRAC", "0.2")),  # RSI 技术止盈建议比例
+                tp_r1=float(os.getenv("TP_R1") or os.getenv("MA_TP_R1", "1.0")),
+                tp_r2=float(os.getenv("TP_R2") or os.getenv("MA_TP_R2", "2.0")),
+                tp_frac1=float(os.getenv("TP_FRAC1") or os.getenv("MA_TP_FRAC1", "0.3")),
+                tp_frac2=float(os.getenv("TP_FRAC2") or os.getenv("MA_TP_FRAC2", "0.3")),
+                tp_trail_atr_mult=float(os.getenv("TP_TRAIL_ATR") or os.getenv("MA_TP_TRAIL_ATR", "1.5")),
+                rsi_tp_high=float(os.getenv("RSI_TP_HIGH") or os.getenv("MA_RSI_TP_HIGH", "80")),
+                rsi_tp_low=float(os.getenv("RSI_TP_LOW") or os.getenv("MA_RSI_TP_LOW", "20")),
+                rsi_tp_frac=float(os.getenv("RSI_TP_FRAC") or os.getenv("MA_RSI_TP_FRAC", "0.2")),
             )
             self._ma_strategies[inst] = MABreakoutStrategy(cfg)
         return self._ma_strategies[inst]

@@ -769,26 +769,78 @@ class TradeExecutor:
 
         # 实盘：调用 OKX REST 下单
         assert self.client is not None, "实盘模式需要 OKXRESTClient"
+        # 根据 close 语义与实盘持仓决定正确方向（修复 reduceOnly 拒单 51170）
         side = signal.side
-        if side == "close":
-            # 合约 close 语义：默认按 reduceOnly 方式减仓；若为现货则等同于卖出
-            side = "sell"
-        # 组装 extra，保留策略传入的 extra 字段，并在 close 时默认加上 reduceOnly=True（对合约有效）
+        # 组装 extra，保留策略传入的 extra 字段
         _extra = {}
         try:
             if isinstance((meta or {}).get("extra"), dict):
                 _extra.update(meta.get("extra") or {})
         except Exception:
             pass
-        if signal.side == "close":
-            # 仅对合约/永续类产品添加 reduceOnly，避免现货接口报无效字段
-            try:
-                inst = str(signal.symbol)
-                is_derivative = (len(inst.split("-")) >= 3) or inst.endswith("-SWAP")
-            except Exception:
-                is_derivative = False
+        # 判断是否为合约/永续
+        try:
+            inst = str(signal.symbol)
+            is_derivative = (len(inst.split("-")) >= 3) or inst.endswith("-SWAP")
+        except Exception:
+            is_derivative = False
+        if side == "close":
+            # 默认加 reduceOnly（仅对衍生品）
             if is_derivative:
                 _extra.setdefault("reduceOnly", True)
+            # 动态决定 close 方向：查询实盘持仓决定 buy/sell（单向模式用净头寸，双向模式用分腿）
+            decided_side = None
+            decided_pos_side = None
+            if is_derivative:
+                try:
+                    pos_resp = self.client.get_positions(inst_id=signal.symbol)
+                    if getattr(pos_resp, "ok", False) and isinstance(getattr(pos_resp, "data", None), list):
+                        long_qty = 0.0
+                        short_qty = 0.0
+                        has_hedge = False
+                        for it in pos_resp.data:
+                            try:
+                                ps = str(it.get("posSide") or "").lower()
+                                q_raw = it.get("pos")
+                                q = float(q_raw) if q_raw is not None else 0.0
+                            except Exception:
+                                continue
+                            if ps in ("long","short"):
+                                has_hedge = True
+                            # 单向/净持仓模式：posSide 可能为 net，此时用 pos 的正负判断
+                            if ps == "long":
+                                long_qty += abs(q)
+                            elif ps == "short":
+                                short_qty += abs(q)
+                            else:
+                                try:
+                                    # net: q>0 视为多，q<0 视为空
+                                    if q > 0:
+                                        long_qty += q
+                                    elif q < 0:
+                                        short_qty += abs(q)
+                                except Exception:
+                                    pass
+                        if long_qty > 1e-8 and short_qty <= 1e-8:
+                            decided_side = "sell"
+                            decided_pos_side = "long" if has_hedge else None
+                        elif short_qty > 1e-8 and long_qty <= 1e-8:
+                            decided_side = "buy"
+                            decided_pos_side = "short" if has_hedge else None
+                        elif (long_qty > 1e-8) or (short_qty > 1e-8):
+                            net = long_qty - short_qty
+                            if net > 0:
+                                decided_side = "sell"; decided_pos_side = "long" if has_hedge else None
+                            elif net < 0:
+                                decided_side = "buy"; decided_pos_side = "short" if has_hedge else None
+                except Exception as e:
+                    logger.warning("查询持仓以决定 close 方向失败，将使用默认方向：{}", e)
+            side = decided_side or ("sell" if side == "close" else side)
+            if is_derivative and decided_pos_side:
+                _extra.setdefault("posSide", decided_pos_side)
+        else:
+            # buy/sell：保持原样
+            pass
 
         resp: OKXResponse = self.client.place_order(
             inst_id=signal.symbol,
@@ -846,6 +898,94 @@ class TradeExecutor:
         self.guard.check_and_maybe_trip(signal.symbol, side, p0, p1)
 
         if not resp.ok:
+            # 针对 reduceOnly 与方向不匹配（51170）做一次纠偏重试：刷新持仓并反向提交 close
+            try:
+                code = str(resp.code)
+            except Exception:
+                code = ""
+            if side in ("buy","sell") and signal.side == "close" and code == "51170":
+                logger.warning("检测到 51170 拒单（reduceOnly 与方向不匹配），尝试刷新持仓后纠偏重试一次…… inst={}", signal.symbol)
+                # 重新决定方向（复用上面的逻辑）：
+                decided_side = None
+                decided_pos_side = None
+                try:
+                    inst = str(signal.symbol)
+                    is_derivative = (len(inst.split("-")) >= 3) or inst.endswith("-SWAP")
+                except Exception:
+                    is_derivative = False
+                if is_derivative:
+                    try:
+                        pos_resp = self.client.get_positions(inst_id=signal.symbol)
+                        if getattr(pos_resp, "ok", False) and isinstance(getattr(pos_resp, "data", None), list):
+                            long_qty = 0.0
+                            short_qty = 0.0
+                            has_hedge = False
+                            for it in pos_resp.data:
+                                try:
+                                    ps = str(it.get("posSide") or "").lower()
+                                    q_raw = it.get("pos")
+                                    q = float(q_raw) if q_raw is not None else 0.0
+                                except Exception:
+                                    continue
+                                if ps in ("long","short"):
+                                    has_hedge = True
+                                if ps == "long":
+                                    long_qty += abs(q)
+                                elif ps == "short":
+                                    short_qty += abs(q)
+                                else:
+                                    if q > 0:
+                                        long_qty += q
+                                    elif q < 0:
+                                        short_qty += abs(q)
+                            if long_qty > 1e-8 and short_qty <= 1e-8:
+                                decided_side = "sell"; decided_pos_side = "long" if has_hedge else None
+                            elif short_qty > 1e-8 and long_qty <= 1e-8:
+                                decided_side = "buy"; decided_pos_side = "short" if has_hedge else None
+                            elif (long_qty > 1e-8) or (short_qty > 1e-8):
+                                net = long_qty - short_qty
+                                if net > 0:
+                                    decided_side = "sell"; decided_pos_side = "long" if has_hedge else None
+                                elif net < 0:
+                                    decided_side = "buy"; decided_pos_side = "short" if has_hedge else None
+                    except Exception as e:
+                        logger.warning("纠偏查询持仓失败：{}", e)
+                # 若仍拿不到方向，则直接用反向作为兜底
+                retry_side = decided_side or ("buy" if side == "sell" else "sell")
+                retry_extra = dict(_extra)
+                if is_derivative and decided_pos_side:
+                    retry_extra["posSide"] = decided_pos_side
+                retry_resp: OKXResponse = self.client.place_order(
+                    inst_id=signal.symbol,
+                    side=retry_side,
+                    ord_type=ord_type,
+                    px=price_str,
+                    sz=sz_str,
+                    td_mode=meta.get("tdMode"),
+                    tgt_ccy=meta.get("tgtCcy"),
+                    cl_ord_id=meta.get("clOrdId"),
+                    tp_trigger_px=(str(meta.get("tpTriggerPx")) if meta.get("tpTriggerPx") is not None else None),
+                    tp_ord_px=(str(meta.get("tpOrdPx")) if meta.get("tpOrdPx") is not None else None),
+                    sl_trigger_px=(str(meta.get("slTriggerPx")) if meta.get("slTriggerPx") is not None else None),
+                    sl_ord_px=(str(meta.get("slOrdPx")) if meta.get("slOrdPx") is not None else None),
+                    tp_trigger_px_type=meta.get("tpTriggerPxType"),
+                    sl_trigger_px_type=meta.get("slTriggerPxType"),
+                    extra=retry_extra,
+                )
+                if getattr(retry_resp, "ok", False):
+                    r_order_id = None
+                    try:
+                        if isinstance(retry_resp.data, list) and retry_resp.data:
+                            r_order_id = retry_resp.data[0].get("ordId") or retry_resp.data[0].get("algoId")
+                    except Exception:
+                        pass
+                    self._append_log({
+                        "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": retry_side,
+                        "price": signal.price, "size": signal.size, "reason": signal.reason, "ok": True,
+                        "order_id": r_order_id, "exchange_code": retry_resp.code, "exchange_msg": retry_resp.msg, "raw": json_trunc(retry_resp.raw),
+                        "retry_fix_51170": True,
+                    })
+                    return ExecResult(ok=True, mode=self.mode, signal=signal, exchange_resp=retry_resp.raw, order_id=r_order_id)
             return ExecResult(ok=False, mode=self.mode, signal=signal, exchange_resp=resp.raw, err=resp.msg)
         return ExecResult(ok=True, mode=self.mode, signal=signal, exchange_resp=resp.raw, order_id=order_id)
 
