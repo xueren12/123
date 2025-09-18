@@ -116,19 +116,19 @@ class MABreakoutStrategy:
             try:
                 mins = int(s[:-1])
                 mins = max(1, mins)
-                return f"{mins}T", mins * 60
+                return f"{mins}min", mins * 60
             except Exception:
                 pass
         if s.endswith("s"):
             try:
                 secs = int(s[:-1])
                 secs = max(1, secs)
-                return f"{secs}S", secs
+                return f"{secs}s", secs
             except Exception:
                 pass
         # 兜底 1 分钟
         logger.warning("无法解析 timeframe={}，回退为 1min", tf)
-        return "1T", 60
+        return "1min", 60
 
     def _load_price_series(self) -> pd.DataFrame:
         """加载近一段时间的 OHLC 序列，索引为 UTC 时间。
@@ -274,16 +274,41 @@ class MABreakoutStrategy:
         atr = tr.rolling(int(atr_period)).mean()
         atr1 = float(atr.iloc[-1]) if not np.isnan(float(atr.iloc[-1])) else None
 
-        # ============ 多重确认逻辑 ==========
+        # —— 从序列提取当前/前一根数值，便于后续条件判断 ——
+        # 收盘价与最高价（最高价用于移动止损）
+        c1 = float(close.iloc[-1]) if not np.isnan(float(close.iloc[-1])) else float('nan')
+        high1 = (float(high.iloc[-1]) if not np.isnan(float(high.iloc[-1])) else None)
+
+        # MACD 当前与前一根（保持为浮点或 NaN，避免 None 参与比较导致异常）
+        macd1 = float(macd_line.iloc[-1]) if not np.isnan(float(macd_line.iloc[-1])) else float('nan')
+        macd0 = float(macd_line.iloc[-2]) if not np.isnan(float(macd_line.iloc[-2])) else float('nan')
+        sig1 = float(macd_signal.iloc[-1]) if not np.isnan(float(macd_signal.iloc[-1])) else float('nan')
+        sig0 = float(macd_signal.iloc[-2]) if not np.isnan(float(macd_signal.iloc[-2])) else float('nan')
+
+        # 布林带当前上/下轨（保留 NaN，后续使用 np.isnan 判断）
+        bb_up1 = float(bb_upper.iloc[-1])
+        bb_low1 = float(bb_lower.iloc[-1])
+
+        # RSI 当前值（若为 NaN 则置为 None，便于后续 None 判断）
+        _rsi_tmp = float(rsi.iloc[-1]) if not np.isnan(float(rsi.iloc[-1])) else float('nan')
+        rsi1 = None if np.isnan(_rsi_tmp) else _rsi_tmp
+
+        # Aroon 当前/前一根（若为 NaN 则置为 None，避免无效比较）
+        a_up1 = (float(aroon_up.iloc[-1]) if not np.isnan(float(aroon_up.iloc[-1])) else None)
+        a_up0 = (float(aroon_up.iloc[-2]) if not np.isnan(float(aroon_up.iloc[-2])) else None)
+        a_dn1 = (float(aroon_down.iloc[-1]) if not np.isnan(float(aroon_down.iloc[-1])) else None)
+        a_dn0 = (float(aroon_down.iloc[-2]) if not np.isnan(float(aroon_down.iloc[-2])) else None)
+
+        # ============ 多重确认逻辑 ==========  # 补回缺失的确认布尔量定义
         # MACD 确认：金叉/死叉 或者 位于信号线上下且方向一致
         macd_cross_up = (macd0 <= sig0) and (macd1 > sig1)
         macd_cross_dn = (macd0 >= sig0) and (macd1 < sig1)
-        macd_bull_ok = macd_cross_up or (macd1 > sig1 and macd1 > 0)
-        macd_bear_ok = macd_cross_dn or (macd1 < sig1 and macd1 < 0)
+        macd_bull_ok = (macd_cross_up or (macd1 > sig1 and macd1 > 0))
+        macd_bear_ok = (macd_cross_dn or (macd1 < sig1 and macd1 < 0))
 
         # 布林带确认：突破上轨/下轨
-        bb_bull_ok = c1 > bb_up1 if not np.isnan(bb_up1) else False
-        bb_bear_ok = c1 < bb_low1 if not np.isnan(bb_low1) else False
+        bb_bull_ok = (False if np.isnan(bb_up1) else (c1 > bb_up1))
+        bb_bear_ok = (False if np.isnan(bb_low1) else (c1 < bb_low1))
 
         # RSI 确认：多头 >= rsi_buy；空头 <= rsi_sell
         rsi_bull_ok = (rsi1 is not None) and (rsi1 >= float(self.cfg.rsi_buy))
@@ -513,3 +538,5 @@ class MABreakoutStrategy:
                 self.db.close()
             except Exception:
                 pass
+
+# ===== 同文件顶部 _parse_timeframe 的返回值频率字符串修正：'T'->'min'、'S'->'s' =====

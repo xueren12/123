@@ -142,7 +142,10 @@ try {
     if ($End -match '(\d{4})\D?(\d{2})\D?(\d{2})') { $endStr = "$($Matches[1])$($Matches[2])$($Matches[3])" } else { $endStr = 'end' }
 }
 $tfStr = $backtest_timeframe
-$outDir = Join-Path $DataDir "start_${startStr}_end_${endStr}_tf_${tfStr}"
+# 在目录名中加入 inst（仅取基础币种，如 ETH-USDT-SWAP/ETH-USDT/ETH → ETH）
+$instBase = ($Inst.ToUpper() -replace "-SWAP", "")
+$instBase = ($instBase -split "-")[0] -split "/" | Select-Object -First 1
+$outDir = Join-Path $DataDir "start_${startStr}_end_${endStr}_tf_${tfStr}_inst_${instBase}"
 
 $products = @(
     (Join-Path $outDir 'backtest_ma_breakout.csv'),

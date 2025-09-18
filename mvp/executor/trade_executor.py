@@ -24,6 +24,7 @@ from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Callable
+import math  # 新增：用于手数步进取整
 
 from loguru import logger
 
@@ -121,6 +122,8 @@ class CircuitBreaker:
         self._db: Optional[TimescaleDB] = None
         # 审计记录器（可选注入）
         self.audit: Optional[AuditLogger] = audit
+        # 懒加载 OKX REST 客户端（用于公共行情回退），避免 AttributeError
+        self.client: Optional[OKXRESTClient] = None
 
     # ---------- 对外接口 ----------
     def get_mode(self) -> str:
@@ -593,9 +596,79 @@ class TradeExecutor:
                     pass
                 self.client = None
 
-        ord_type = (signal.meta or {}).get("ordType", "market")
+        # 准备 meta 与回测对齐开关（决定是否随单附带止盈/止损）
+        # 注：meta 默认至少包含 ordType，避免后续引用未定义
+        try:
+            meta = dict(signal.meta) if isinstance(signal.meta, dict) else {}
+        except Exception:
+            meta = {}
+        if "ordType" not in meta:
+            meta["ordType"] = "market"
+
+        # 环境开关：设置 DISABLE_SL=1 可强制不随单挂 SL/TP（与回测对齐模式合并判定）
+        try:
+            disable_sl_env = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
+        except Exception:
+            disable_sl_env = False
+        # 配置开关：对齐回测（策略闭环触发 SL/TP，不随单挂）
+        try:
+            align_backtest = bool(getattr(self.cfg.exec, "align_backtest", False))
+        except Exception:
+            align_backtest = False
+        align_no_sl = bool(disable_sl_env or align_backtest)
+
+        ord_type = meta.get("ordType", "market")
         price_str = f"{signal.price}" if signal.price is not None else None
-        sz_str = f"{signal.size}"
+        # 下单数量在发送前按交易所手数步进与最小值进行规整，避免“数量非手数倍数”
+        aligned_size = float(signal.size)
+        try:
+            inst = str(signal.symbol)
+            # 简单判定产品类型：两段为现货，>=三段或以 -SWAP 结尾视为合约/永续
+            parts = inst.split("-")
+            inst_type = "SPOT" if len(parts) == 2 else "SWAP"
+            # 查询品种规则（含 lotSz/minSz）
+            lot_sz: Optional[float] = None
+            min_sz: Optional[float] = None
+            if self.client is not None:
+                resp_rules = self.client.get_instruments(inst_type=inst_type, inst_id=inst)
+                if resp_rules.ok and isinstance(resp_rules.data, list):
+                    for it in resp_rules.data:
+                        if str(it.get("instId")) == inst:
+                            try:
+                                lot_sz = float(it.get("lotSz")) if it.get("lotSz") is not None else None
+                            except Exception:
+                                lot_sz = None
+                            try:
+                                min_sz = float(it.get("minSz")) if it.get("minSz") is not None else None
+                            except Exception:
+                                min_sz = None
+                            break
+            # 按步进向下取整，保证为手数倍数
+            if lot_sz is not None and lot_sz > 0:
+                step = float(lot_sz)
+                k = math.floor(aligned_size / step + 1e-12)
+                aligned_size = k * step
+            # 不能低于最小下单数量
+            if min_sz is not None and aligned_size < min_sz:
+                # 写失败日志并返回错误（避免被交易所拒单）
+                self._append_log({
+                    "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                    "price": signal.price, "size": signal.size, "reason": f"size_below_minSz(minSz={min_sz})", "ok": False,
+                    "order_id": None, "exchange_code": "-1", "exchange_msg": "size < minSz", "raw": "{}",
+                })
+                return ExecResult(ok=False, mode=self.mode, signal=signal, err=f"size<{min_sz}")
+            # 若规整后非正数，同样拒绝下单
+            if aligned_size <= 0:
+                self._append_log({
+                    "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                    "price": signal.price, "size": signal.size, "reason": "size_non_positive_after_align", "ok": False,
+                    "order_id": None, "exchange_code": "-1", "exchange_msg": "size<=0 after align", "raw": "{}",
+                })
+                return ExecResult(ok=False, mode=self.mode, signal=signal, err="size<=0 after align")
+        except Exception as e:
+            # 规整失败不阻断，仅记录调试信息，继续使用原始 size（可能被交易所拒单）
+            logger.debug("下单数量规整异常（忽略）：{}", e)
+        sz_str = f"{aligned_size}"
 
         # 下单前价格（用于熔断估算 & 风控参考价）
         p0 = self.guard.get_last_price(signal.symbol)

@@ -43,6 +43,9 @@ CONFIG = {
     # K线周期：1m/5m/15m/1h/4h/1d 等
     "timeframe": "15m",
 
+    # 新增：回测杠杆倍数（>=1，影响名义杠杆、资金费与换手成本的放大系数）
+    "leverage": 20,
+
     # 起止日期（UTC）
     "start": "2025-01-01",
     "end": "2025-09-16",
@@ -161,6 +164,7 @@ def main() -> int:
         "--start", CONFIG["start"],
         "--end", CONFIG["end"],
         "--timeframe", backtest_timeframe,
+        "--leverage", str(CONFIG["leverage"]),
         "--plot", "1",
     ]
 
@@ -180,7 +184,10 @@ def main() -> int:
     except Exception:
         m = re.search(r"(\d{4})[^0-9]?(\d{2})[^0-9]?(\d{2})", CONFIG["end"]) ; end_str = "".join(m.groups()) if m else "end"
     tf_str = CONFIG["timeframe"].replace("m", "min")
-    out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}"
+    # 在目录名中加入 inst（仅取基础币种，如 ETH-USDT-SWAP/ETH-USDT/ETH → ETH）
+    inst_base = CONFIG["inst"].upper().replace("-SWAP", "")
+    inst_base = inst_base.split("-")[0].split("/")[0]
+    out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_base}"
 
     products = [
         out_dir / "backtest_ma_breakout.csv",

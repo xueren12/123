@@ -64,7 +64,7 @@ class MABacktestConfig:
     fee_bps: float = 0.0  # 双边手续费，单位: bp（基点）。例如 2 表示 0.02%
     slip_bps: float = 0.0  # 新增：滑点/点差成本，单位: bp（基点），按换手额收取
     # ===== 合约交易相关参数 =====
-    leverage: float = 10              # 杠杆倍数（仅做多方向），>=1
+    leverage: float = 50              # 杠杆倍数（仅做多方向），>=1
     funding_bps_8h: float = 0.0        # 资金费率：每8小时的bp，可为负表示收取资金费
     mmr_bps: float = 50.0              # 维持保证金率（bp），默认0.50%
     liq_penalty_bps: float = 10.0      # 强平附加惩罚（bp）
@@ -102,7 +102,10 @@ class MABreakoutBacktester:
             start_str = "start"
             end_str = "end"
         tf_str = str(cfg.timeframe).strip().replace("/", "-")
-        self.output_dir = _os.path.join("data", f"start_{start_str}_end_{end_str}_tf_{tf_str}")
+        # 在目录名中加入 inst（仅取基础币种，如 ETH-USDT/ETH/USDT → ETH）
+        inst_base = str(cfg.inst).upper().replace("-SWAP", "")
+        inst_base = inst_base.split("-")[0].split("/")[0]
+        self.output_dir = _os.path.join("data", f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_base}")
         _os.makedirs(self.output_dir, exist_ok=True)
 
     @staticmethod

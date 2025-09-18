@@ -19,6 +19,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
+from urllib.parse import urlencode
 
 import httpx
 from loguru import logger
@@ -107,10 +108,13 @@ class OKXRESTClient:
         request_path = path
         query = None
         body_str = ""
+        qp = None  # 传给 httpx 的 params，保持与签名一致的顺序
         if method.upper() == "GET" and params:
-            # 构造查询串（httpx 会自动拼接，但签名需要完整 path?query）
-            query = httpx.QueryParams(params).render()
+            # 构造确定性查询串（按 key 排序），签名与实际请求严格一致
+            items = sorted(list(params.items()), key=lambda kv: kv[0])
+            query = urlencode(items, doseq=True)
             request_path = f"{path}?{query}"
+            qp = items
         if method.upper() != "GET" and body:
             body_str = json.dumps(body, separators=(",", ":"))
         sign = self._sign(timestamp, method, request_path, body_str)
@@ -118,7 +122,7 @@ class OKXRESTClient:
 
         try:
             if method.upper() == "GET":
-                r = self._client.get(path, params=params, headers=headers)
+                r = self._client.get(path, params=(qp if qp is not None else params), headers=headers)
             elif method.upper() == "POST":
                 r = self._client.post(path, content=body_str if body_str else None, headers=headers)
             else:
@@ -272,6 +276,18 @@ class OKXRESTClient:
             return self._request_public("GET", path, params=params)
         return self._request("GET", path, params=params)
 
+    def get_instruments(self, inst_type: str, inst_id: Optional[str] = None) -> OKXResponse:
+        """获取品种规则（含 lotSz/minSz/tickSz 等）：/api/v5/public/instruments
+        - inst_type: SPOT/SWAP/FUTURES/OPTION
+        - 可选 inst_id：若提供则服务端按 instId 精确匹配
+        """
+        path = "/api/v5/public/instruments"
+        params: Dict[str, Any] = {"instType": inst_type}
+        if inst_id is not None:
+            params["instId"] = inst_id
+        # 公共端点无需签名
+        return self._request_public("GET", path, params=params)
+
     # 新增：获取历史/最新 K 线（公共端点）
     def get_candles(self, inst_id: str, bar: str = "1m", before: Optional[str] = None, after: Optional[str] = None, limit: int = 100) -> OKXResponse:
         """获取最近一段时间的 K 线：/api/v5/market/candles
@@ -286,6 +302,30 @@ class OKXRESTClient:
             params["after"] = str(after)
         return self._request_public("GET", path, params=params)
 
+    # =============== 账户接口（私有） ===============
+    def get_balance(self, ccy: Optional[str] = None) -> OKXResponse:
+        """查询账户余额：/api/v5/account/balance
+        - ccy 可选，逗号分隔多个币种，如 "BTC,USDT"
+        - 返回 data[0].details 列表（spot 等）
+        """
+        path = "/api/v5/account/balance"
+        params: Optional[Dict[str, Any]] = None
+        if ccy is not None and str(ccy).strip() != "":
+            params = {"ccy": str(ccy).strip()}
+        return self._request("GET", path, params=params)
+
+    def get_positions(self, inst_type: Optional[str] = None, inst_id: Optional[str] = None) -> OKXResponse:
+        """查询持仓：/api/v5/account/positions
+        - inst_type 可选：SPOT/SWAP/FUTURES/OPTION
+        - inst_id 可选：如 BTC-USDT, BTC-USDT-SWAP
+        """
+        path = "/api/v5/account/positions"
+        params: Dict[str, Any] = {}
+        if inst_type:
+            params["instType"] = inst_type
+        if inst_id:
+            params["instId"] = inst_id
+        return self._request("GET", path, params=params)
     def get_history_candles(self, inst_id: str, bar: str = "1m", before: Optional[str] = None, after: Optional[str] = None, limit: int = 100) -> OKXResponse:
         """获取历史 K 线：/api/v5/market/history-candles（更适合翻页拉历史）
         - 参数同 get_candles
