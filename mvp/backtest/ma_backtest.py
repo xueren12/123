@@ -61,8 +61,8 @@ class MABacktestConfig:
     brk: int = 20
     buffer: float = 0.0
     # 成本与输出
-    fee_bps: float = 0.0  # 双边手续费，单位: bp（基点）。例如 2 表示 0.02%
-    slip_bps: float = 0.0  # 新增：滑点/点差成本，单位: bp（基点），按换手额收取
+    fee_bps: float = 0.0  # 手续费（单边），单位: bp（基点）。例如 2 表示 0.02%
+    slip_bps: float = 0.0  # 滑点/点差成本，单位: bp（基点），按换手额收取
     # ===== 合约交易相关参数 =====
     leverage: float = 50              # 杠杆倍数（仅做多方向），>=1
     funding_bps_8h: float = 0.0        # 资金费率：每8小时的bp，可为负表示收取资金费
@@ -203,14 +203,115 @@ class MABreakoutBacktester:
             raise RuntimeError("构造收盘价序列失败：orderbook 数据不足")
         return s
 
+    # 新增：真实 OHLC 加载（优先 trades → OHLC，回退 orderbook mid → OHLC；CSV 直接聚合）
+    def _load_ohlc(self) -> pd.DataFrame:
+        """加载并返回真实 OHLC 数据（索引为UTC，列为 open/high/low/close）。
+        优先从 trades 重采样生成 OHLC；若无则从 orderbook mid 聚合；CSV 则按列聚合/重采样。
+        """
+        freq, step_secs = self._parse_timeframe(self.cfg.timeframe)
+        end_db = self.cfg.end + timedelta(seconds=step_secs)
+        # =========== 分支一：CSV ==========
+        if str(self.cfg.source).lower() == "csv":
+            path = self.cfg.csv_path
+            if not path:
+                raise RuntimeError("当 source=csv 时必须提供 --csv 路径")
+            df = pd.read_csv(path)
+            # 解析时间列
+            ts_col = None
+            for c in ["ts", "timestamp", "time", "date"]:
+                if c in df.columns:
+                    ts_col = c
+                    break
+            if ts_col is None:
+                raise RuntimeError("CSV 缺少时间列（期望: ts/timestamp/time/date 之一）")
+            try:
+                s_ts = pd.to_datetime(df[ts_col], utc=True)
+            except Exception:
+                s_ts = pd.to_datetime(df[ts_col].astype("int64"), unit="ms", utc=True)
+            df = df.assign(ts=s_ts).set_index("ts").sort_index()
+            # 解析列并重采样
+            cols_lower = {c.lower(): c for c in df.columns}
+            if all(k in cols_lower for k in ["open", "high", "low", "close"]):
+                o = df[cols_lower["open"]].astype(float)
+                h = df[cols_lower["high"]].astype(float)
+                l = df[cols_lower["low"]].astype(float)
+                c = df[cols_lower["close"]].astype(float)
+                ohlc = pd.DataFrame({"open": o, "high": h, "low": l, "close": c}).resample(freq).agg({
+                    "open": "first", "high": "max", "low": "min", "close": "last"
+                })
+            else:
+                # 若缺少完整OHLC列，则根据 close 近似构造（不建议，仅兜底）
+                logger.warning("CSV 缺少完整OHLC列，使用收盘价近似生成高低（建议提供真实OHLC）")
+                close_col = None
+                for c in ["close", "c", "Close", "last"]:
+                    if c in df.columns:
+                        close_col = c
+                        break
+                if close_col is None:
+                    raise RuntimeError("CSV 缺少收盘价列（期望: close/c/last 之一）")
+                close = df[close_col].astype(float).resample(freq).last().ffill()
+                prev = close.shift(1)
+                high = pd.concat([close, prev], axis=1).max(axis=1)
+                low = pd.concat([close, prev], axis=1).min(axis=1)
+                ohlc = pd.DataFrame({"open": prev.fillna(close), "high": high, "low": low, "close": close})
+            ohlc = ohlc[(ohlc.index >= self.cfg.start) & (ohlc.index <= self.cfg.end)].dropna(how="all")
+            # 基础填充，保证 open/high/low/close 连续
+            ohlc["close"] = ohlc["close"].ffill()
+            ohlc["open"] = ohlc["open"].fillna(ohlc["close"]).ffill()
+            ohlc["high"] = ohlc[["high", "open", "close"]].max(axis=1)
+            ohlc["low"] = ohlc[["low", "open", "close"]].min(axis=1)
+            if ohlc.empty:
+                raise RuntimeError("CSV 转换后 OHLC 为空，请检查时间区间/列名")
+            return ohlc
+
+        # =========== 分支二：DB（优先 trades → OHLC） ==========
+        tr = None
+        try:
+            if self.db is None:
+                self.db = TimescaleDB()
+            tr = self.db.fetch_trades_window(start=self.cfg.start, end=end_db, inst_id=self.cfg.inst, ascending=True)
+        except Exception as e:
+            logger.debug("读取 trades 失败，回退 orderbook：{}", e)
+        if tr is not None and not tr.empty:
+            tr["ts"] = pd.to_datetime(tr["ts"], utc=True)
+            s = tr.set_index("ts").sort_index()["price"].astype(float)
+            ohlc = s.resample(freq).ohlc().dropna(how="all").ffill()
+            ohlc = ohlc[(ohlc.index >= self.cfg.start) & (ohlc.index <= self.cfg.end)]
+            if not ohlc.empty:
+                return ohlc
+        # 回退：orderbook mid → OHLC
+        if self.db is None:
+            self.db = TimescaleDB()
+        ob = self.db.fetch_orderbook_window(start=self.cfg.start, end=end_db, inst_id=self.cfg.inst, ascending=True)
+        if ob is None or ob.empty:
+            raise RuntimeError("数据库中缺少可用的 trades/orderbook 数据以构造 OHLC")
+        ob["ts"] = pd.to_datetime(ob["ts"], utc=True)
+        ob = ob.set_index("ts").sort_index()
+        def _mid(row):
+            try:
+                bb = float(row["bids"][0][0]) if row["bids"] else np.nan
+                ba = float(row["asks"][0][0]) if row["asks"] else np.nan
+                return np.nanmean([bb, ba])
+            except Exception:
+                return np.nan
+        ob["mid"] = ob.apply(_mid, axis=1)
+        s = ob["mid"].astype(float)
+        ohlc = s.resample(freq).agg(["first", "max", "min", "last"]).rename(columns={
+            "first": "open", "max": "high", "min": "low", "last": "close"
+        }).dropna(how="all").ffill()
+        ohlc = ohlc[(ohlc.index >= self.cfg.start) & (ohlc.index <= self.cfg.end)]
+        if ohlc.empty:
+            raise RuntimeError("构造 OHLC 失败：orderbook 数据不足")
+        return ohlc
     def run(self) -> dict:
         """多指标确认 + 风控/止盈止损 的回测主循环（仅做多，支持分批止盈与移动止损）"""
-        # 1) 加载收盘价（OHLC 近似：用前一根与当前收盘生成高低，避免 ATR=0）
-        close = self._load_close_series().astype(float)
+        # 1) 使用真实 OHLC 驱动（高/低/收盘来自真实数据，不再用收盘近似）
+        ohlc = self._load_ohlc()
+        close = ohlc["close"].astype(float)
         prev_close = close.shift(1)
-        high = pd.concat([close, prev_close], axis=1).max(axis=1).astype(float)
-        low = pd.concat([close, prev_close], axis=1).min(axis=1).astype(float)
-
+        high = ohlc["high"].astype(float)
+        low = ohlc["low"].astype(float)
+        
         # 2) 指标计算
         # MACD
         ema_fast = close.ewm(span=int(self.cfg.macd_fast), adjust=False).mean()
@@ -460,11 +561,12 @@ class MABreakoutBacktester:
         try:
             pos_series = df["pos"].fillna(0.0)
             ret_series = df["ret"].fillna(0.0)
-            in_pos = pos_series.ne(0.0)
-            prev = in_pos.shift(1)
-            next_ = in_pos.shift(-1)
-            starts = in_pos & (~prev.fillna(False).astype(bool))
-            ends = in_pos & (~next_.fillna(False).astype(bool))
+            # 使用可空布尔类型，避免 fillna 触发未来版本的降级警告
+            in_pos = pos_series.ne(0.0).astype("boolean")
+            prev = in_pos.shift(1).fillna(False).astype("boolean")
+            next_ = in_pos.shift(-1).fillna(False).astype("boolean")
+            starts = in_pos & (~prev)
+            ends = in_pos & (~next_)
             start_idx = list(df.index[starts])
             end_idx = list(df.index[ends])
             wins = 0
@@ -580,12 +682,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--slow", type=int, default=30, help="兼容旧参数：慢线窗口（映射为 MACD 慢线窗口）")
     p.add_argument("--brk", type=int, default=20, help="兼容旧参数：突破回看窗口（映射为布林带窗口）")
     p.add_argument("--buffer", type=float, default=0.0, help="兼容旧参数：突破缓冲比例（不再使用）")
-    p.add_argument("--fee_bps", type=float, default=0.0, help="双边手续费，基点，例如 2=0.02%")
-    p.add_argument("--slip_bps", type=float, default=0.0, help="滑点/点差成本，基点，例如 2=0.02%")
+    p.add_argument("--fee_bps", type=float, default=0.0, help="手续费（单边），基点，例如 2=0.02%%")
+    p.add_argument("--slip_bps", type=float, default=0.0, help="滑点/点差成本，基点，例如 2=0.02%%")
     # ===== 合约交易相关参数 =====
     p.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数（仅做多方向），>=1")
     p.add_argument("--funding_bps_8h", type=float, default=0.0, help="资金费率：每8小时的bp，可为负表示收取资金费")
-    p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%")
+    p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%%")
     p.add_argument("--liq_penalty_bps", type=float, default=10.0, help="强平附加惩罚（bp）")
     # ==========================
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")

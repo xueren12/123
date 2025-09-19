@@ -610,12 +610,8 @@ class TradeExecutor:
             disable_sl_env = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
         except Exception:
             disable_sl_env = False
-        # 配置开关：对齐回测（策略闭环触发 SL/TP，不随单挂）
-        try:
-            align_backtest = bool(getattr(self.cfg.exec, "align_backtest", False))
-        except Exception:
-            align_backtest = False
-        align_no_sl = bool(disable_sl_env or align_backtest)
+        # 删除：对齐回测开关。执行器不再感知“回测对齐”模式，完全按实盘流程处理
+        align_no_sl = bool(disable_sl_env)
 
         ord_type = meta.get("ordType", "market")
         price_str = f"{signal.price}" if signal.price is not None else None
@@ -870,7 +866,7 @@ class TradeExecutor:
             "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": side,
             "price": signal.price, "size": signal.size, "reason": signal.reason, "ok": resp.ok,
             "order_id": order_id, "exchange_code": resp.code, "exchange_msg": resp.msg, "raw": json_trunc(resp.raw),
-            "align_no_sl": align_no_sl,
+            "align_no_sl": align_no_sl,  # 保留该字段，但语义仅表示因环境变量禁用 SL
         })
 
         # 审计：结果

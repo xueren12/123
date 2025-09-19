@@ -36,6 +36,9 @@ from strategies.multi_indicator import MABreakoutStrategy, MABreakoutConfig
 from executor.trade_executor import TradeExecutor, TradeSignal
 from models.ai_advisor import AIAdvisor, build_payload
 from utils.position import PositionManager  # 引入仓位管理器
+# 新增：引入 OKX REST 客户端与时间工具（用于预填K线）
+from executor.okx_rest import OKXRESTClient
+from datetime import datetime, timezone, timedelta
 
 
 class SystemOrchestrator:
@@ -43,7 +46,7 @@ class SystemOrchestrator:
 
     def __init__(self, cfg: Optional[AppConfig] = None) -> None:
         self.cfg = cfg or AppConfig()
-        self.db = TimescaleDB(self.cfg)
+        self.db = TimescaleDB()
         # 采集器开关：允许在本地离线冒烟时禁用 WS 采集器
         self.collector_enabled = os.getenv("COLLECTOR_ENABLED", "1") == "1"
         self.collector = OKXWSCollector(self.cfg) if self.collector_enabled else None
@@ -133,14 +136,148 @@ class SystemOrchestrator:
                 return float(int(s.replace("d", "")) * 86400)
         except Exception:
             pass
-        # 默认 1 分钟
         return 60.0
+
+    def _tf_to_okx_bar(self, tf: str) -> str:
+        """将常见 timeframe 写法转换为 OKX bar 取值。未识别时回退为 1m。"""
+        s = (tf or "1min").strip().lower()
+        if s.endswith("min"):
+            try:
+                n = int(s[:-3]); return f"{max(1, n)}m"
+            except Exception:
+                return "1m"
+        if s.endswith("m"):
+            try:
+                n = int(s[:-1]); return f"{max(1, n)}m"
+            except Exception:
+                return "1m"
+        if s.endswith("h"):
+            try:
+                n = int(s[:-1]); return f"{max(1, n)}H"
+            except Exception:
+                return "1m"
+        if s.endswith("d"):
+            try:
+                n = int(s[:-1]); return f"{max(1, n)}D"
+            except Exception:
+                return "1m"
+        return "1m"
+
+    def _warmup_kline(self, insts: List[str]) -> None:
+        """根据 timeframe 与指标窗口，预填充最少所需根数的 K 线到 trades 表（以模拟成交写入）。"""
+        try:
+            tf_env = os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min")
+            sec_per_bar = self._timeframe_seconds(tf_env)
+            if sec_per_bar <= 0:
+                sec_per_bar = 60.0
+            bar = self._tf_to_okx_bar(tf_env)
+            # 初始化 DB 与 REST 客户端
+            db = TimescaleDB()
+            db.connect()
+            rest = OKXRESTClient(self.cfg)
+            for inst in insts:
+                try:
+                    # 依据策略配置计算与策略一致的最小需求根数
+                    strat = self._get_strategy(inst)
+                    cfg = getattr(strat, "cfg")
+                    atr_period = 14
+                    min_need = max(
+                        int(getattr(cfg, "macd_slow", 26) + getattr(cfg, "macd_signal", 9) + 5),
+                        int(getattr(cfg, "bb_period", 20) + 5),
+                        int(getattr(cfg, "rsi_period", 14) + 5),
+                        int(getattr(cfg, "aroon_period", 25) + 1),
+                        int(atr_period + 5),
+                    )
+                    # 时间窗口：多取 2 根缓冲
+                    end = datetime.now(timezone.utc)
+                    start = end - timedelta(seconds=(min_need + 2) * float(sec_per_bar))
+                    # 优先：直接获取最近 N 根 K 线，避免大范围分页
+                    limit_n = max(5, min(min_need + 2, 300))  # OKX 单次上限通常为 300
+                    rows = None
+                    try:
+                        resp = rest.get_candles(inst_id=inst, bar=bar, limit=limit_n)
+                        if resp.ok and resp.data:
+                            rows = resp.data
+                        else:
+                            logger.warning("[预填K线] get_candles 返回为空/失败，回退到按区间分页：inst={} tf={} bar={}", inst, tf_env, bar)
+                    except Exception as e:
+                        logger.warning("[预填K线] get_candles 异常：{}，回退到按区间分页", e)
+                    # 回退：使用区间分页（仅在 rows 为空时触发）
+                    if not rows:
+                        ok, rows = rest.fetch_ohlcv_range(inst_id=inst, bar=bar, start=start, end=end, limit_per_call=100, use_history=False)
+                        if not ok or not rows:
+                            logger.warning("[预填K线] 拉取失败/为空：inst={} tf={} bar={}", inst, tf_env, bar)
+                            continue
+                    # 规范化与截取
+                    rows = [r for r in rows if len(r) >= 5]
+                    rows.sort(key=lambda r: int(r[0]))
+                    if len(rows) > min_need:
+                        rows = rows[-min_need:]
+                    # 查询已存在的 warmup trade_id，避免重复
+                    try:
+                        df_exist = db.fetch_trades_window(start=start, end=end, inst_id=inst, ascending=True)
+                        exist_ids = set()
+                        if df_exist is not None and not df_exist.empty:
+                            try:
+                                exist_ids = set([str(x) for x in df_exist.get("trade_id", []) if x and str(x).startswith("warmup:")])
+                            except Exception:
+                                exist_ids = set()
+                    except Exception:
+                        exist_ids = set()
+                    to_insert: List[Dict[str, Any]] = []
+                    for r in rows:
+                        try:
+                            ts_ms = int(r[0])
+                            o = float(r[1]); h = float(r[2]); l = float(r[3]); c = float(r[4])
+                            bar_start = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+                            sec = int(max(1, int(sec_per_bar)))
+                            # 在该 bar 内生成 4 个时间点（开/高/低/收）
+                            open_ts = bar_start + timedelta(milliseconds=1)
+                            high_ts = bar_start + timedelta(seconds=max(0, int(sec * 0.3)))
+                            low_ts = bar_start + timedelta(seconds=max(0, int(sec * 0.6)))
+                            close_ts = bar_start + timedelta(seconds=sec) - timedelta(milliseconds=1)
+                            pts = [
+                                (open_ts, o, "o"),
+                                (high_ts, h, "h"),
+                                (low_ts, l, "l"),
+                                (close_ts, c, "c"),
+                            ]
+                            for ts_dt, px, tag in pts:
+                                tid = f"warmup:{inst}:{int(bar_start.timestamp())}:{tag}"
+                                if tid in exist_ids:
+                                    continue
+                                to_insert.append({
+                                    "ts": ts_dt,
+                                    "inst_id": inst,
+                                    "side": "warmup",   # 标记 warmup
+                                    "price": px,
+                                    "size": 0.0,
+                                    "trade_id": tid,
+                                    "source": "warmup",
+                                })
+                        except Exception:
+                            continue
+                    if to_insert:
+                        n = db.insert_trades(to_insert)
+                        logger.success("[预填K线] 已写入 {} 条模拟成交 -> inst={} tf={} bars={}", n, inst, tf_env, len(rows))
+                    else:
+                        logger.info("[预填K线] 无需写入 -> inst={} tf={} bars={}", inst, tf_env, len(rows))
+                except Exception as e:
+                    logger.warning("[预填K线] 单标的异常：inst={} err={}", inst, e)
+            try:
+                db.close()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("[预填K线] 初始化失败：{}", e)
 
     # ========== 组件启动/停止 ==========
     async def start(self) -> None:
         """启动采集器、策略循环与监控。"""
         insts = [s.strip() for s in self.cfg.ws.instruments if s.strip()]
         logger.info("系统启动：标的={}, 执行模式={}, AI门控={}, 监控={}", insts, self.executor.mode, self.ai_gate_enabled, self.monitor_enabled)
+        # 启动前：预填 K 线，确保策略首次运行时指标窗口充足
+        self._warmup_kline(insts)
 
         # 1) 启动 OKX 采集器（异步任务，可禁用）
         if self.collector_enabled and self.collector is not None:
@@ -185,7 +322,6 @@ class SystemOrchestrator:
 
         logger.success("系统已停止。")
 
-    # ========== 策略循环 ==========
     def _get_strategy(self, inst: str) -> Any:
         """仅保留均线+突破策略"""
         if inst not in self._strategies:
@@ -209,7 +345,7 @@ class SystemOrchestrator:
             trail_atr_val = (d.trailing_atr if d is not None else float(os.getenv("MA_TP_TRAIL_ATR", "1.5")))
 
             strat_cfg = MABreakoutConfig(
-                inst=inst,
+                inst_id=inst,
                 # 优先读取新命名（MI_*），回退到旧命名（MA_*），不影响现有部署
                 fast_ma=int(os.getenv("MI_FAST") or os.getenv("MA_FAST", "10")),
                 slow_ma=int(os.getenv("MI_SLOW") or os.getenv("MA_SLOW", "30")),
@@ -222,6 +358,8 @@ class SystemOrchestrator:
                 macd_signal=int(os.getenv("MACD_SIGNAL", "9")),
                 rsi_period=int(os.getenv("RSI_PERIOD", "14")),
                 aroon_period=int(os.getenv("AROON_PERIOD", "14")),
+                # 新增：显式设置策略 timeframe，确保与预填口径一致
+                timeframe=(os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min")),
             )
             self._strategies[inst] = MABreakoutStrategy(strat_cfg)
         return self._strategies[inst]
@@ -320,16 +458,8 @@ class SystemOrchestrator:
                             meta = {"ordType": ord_type}
                             # 止损开关：若设置了环境变量 DISABLE_SL=1，则不附带止损参数
                             disable_sl_env = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
-                            # 回测对齐模式：强制使用市价单，TP/SL 由策略信号闭环触发，不随单挂条件单
-                            try:
-                                align_backtest = bool(getattr(self.cfg.exec, "align_backtest", False))
-                            except Exception:
-                                align_backtest = False
-                            if align_backtest:
-                                ord_type = "market"
-                                meta["ordType"] = "market"
-                            # 结合环境开关与回测对齐开关，判断是否禁用随单 SL
-                            disable_sl = disable_sl_env or align_backtest
+                            # 删除“回测对齐”相关逻辑：实盘逻辑不再受回测影响，仅保留环境变量控制
+                            disable_sl = disable_sl_env
                             # 透传策略建议止损价 -> 风控/执行可利用（slTriggerPx 或 slOrdPx）
                             if (not disable_sl) and (sig.get("sl") is not None):
                                 try:
@@ -347,12 +477,8 @@ class SystemOrchestrator:
                                 pass
                             reason = sig.get("reason") or "multi_indicator"
 
-                            # 在“回测对齐”语义下：对于止盈/止损类 SELL，改为 close 语义（执行器会为合约单自动加 reduceOnly）
+                            # 统一方向小写（不再进行“回测对齐”的 SELL->close 语义转换）
                             ts_side = side.lower()
-                            if ts_side == "sell":
-                                r = str(reason)
-                                if r.startswith("takeprofit") or r.startswith("stoploss"):
-                                    ts_side = "close"
 
                             trade_sig = TradeSignal(
                                 ts=ts, symbol=inst, side=ts_side, price=None,

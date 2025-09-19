@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "sharpe": -80.75889938559163,
+    "winrate": 0.0,
+    "max_drawdown": 0.009894699015193353
+  },
+  "context": {
+    "inst": "BTC-USDT",
+    "start": "2025-01-01T00:00:00+00:00",
+    "end": "2025-01-01T01:00:00+00:00",
+    "timeframe": "1min",
+    "bars": 60
+  }
+}

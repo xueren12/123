@@ -1,0 +1,4 @@
+2025-09-20 00:13:40 | INFO | 已启用文件日志：data/audit/download.log
+2025-09-20 00:13:44 | WARNING | load_markets 失败（第 1 次）：okx GET https://www.okx.com/api/v5/public/instruments?instType=SPOT
+2025-09-20 00:13:45 | WARNING | load_markets 失败（第 2 次）：okx GET https://www.okx.com/api/v5/public/instruments?instType=SPOT
+2025-09-20 00:13:47 | WARNING | load_markets 失败（第 3 次）：okx GET https://www.okx.com/api/v5/public/instruments?instType=SPOT

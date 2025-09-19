@@ -231,7 +231,11 @@ class MABreakoutStrategy:
             int(self.cfg.aroon_period + 1),
             int(atr_period + 5),
         )
+        # 中文调试日志：打印最小需求与实际条数
+        logger.info("数据统计：inst_id={}, timeframe={}, min_need={}, 实际条数={}", self.cfg.inst_id, self.cfg.timeframe, min_need, len(close))
         if len(close) < min_need:
+            # 中文调试日志：数据不足时打印详细原因
+            logger.info("数据不足：inst_id={}, timeframe={}, 需要至少 {} 条，当前 {}", self.cfg.inst_id, self.cfg.timeframe, min_need, len(close))
             return None
 
         # ============ 指标计算：全部基于 pandas ============
@@ -324,6 +328,8 @@ class MABreakoutStrategy:
         buy_confirms = int(macd_bull_ok) + int(bb_bull_ok) + int(rsi_bull_ok) + int(aroon_bull_ok)
         sell_confirms = int(macd_bear_ok) + int(bb_bear_ok) + int(rsi_bear_ok) + int(aroon_bear_ok)
         need = int(max(1, min(4, int(self.cfg.confirm_min))))
+        # 中文调试日志：打印确认统计
+        logger.info("确认统计：inst_id={}, timeframe={}, buy_confirms={}, sell_confirms={}, 需要={}", self.cfg.inst_id, self.cfg.timeframe, buy_confirms, sell_confirms, need)
 
         # 生成“基础信号”：至少满足确认数，且方向上不“打架”
         if buy_confirms >= need and buy_confirms > sell_confirms:
@@ -472,6 +478,8 @@ class MABreakoutStrategy:
                         self._pos = 0
                         self._entry_price = None
                         self._entry_ts = None
+                        self._entry_high = None
+                        self._trail_stop = None
                         self._entry_high = None
                         self._trail_stop = None
                         self._init_risk = None
