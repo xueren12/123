@@ -357,6 +357,7 @@ class MABreakoutBacktester:
         _remain_frac = 0.0
         _trail_stop = None
         _entry_high = None
+        _entry_low = None  # 新增：记录开仓时的最低价（用于空头止损/止盈逻辑）
         _init_risk = None
 
         fee_rate = abs(self.cfg.fee_bps) / 10000.0
@@ -395,6 +396,7 @@ class MABreakoutBacktester:
             a_up0 = float(aroon_up.iloc[i-1]) if i > 0 and pd.notna(aroon_up.iloc[i-1]) else None
             a_dn0 = float(aroon_down.iloc[i-1]) if i > 0 and pd.notna(aroon_down.iloc[i-1]) else None
             high1 = float(high.iloc[i]) if pd.notna(high.iloc[i]) else None
+            low1 = float(low.iloc[i]) if pd.notna(low.iloc[i]) else None  # 新增：读取当根K线的最低价
             atr1 = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else None
 
             out_sig = "HOLD"
@@ -449,6 +451,10 @@ class MABreakoutBacktester:
                     if (not tp_triggered) and rsi1 is not None and (rsi1 >= 80.0 or rsi1 <= 20.0):
                         out_sig = "SELL"; size_frac_suggest = float(min(0.2, float(_remain_frac or 1.0)))
 
+                # 回滚：移除空头止盈止损逻辑（仅做多）
+                if _pos < 0:
+                    pass
+
                 # 止损（若未触发止盈）
                 if _pos > 0 and _entry_price is not None and (size_frac_suggest is None or size_frac_suggest >= 0.999):
                     stop_hit = None
@@ -474,11 +480,13 @@ class MABreakoutBacktester:
                     if stop_hit:
                         out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0)
 
+
                 # 状态更新（支持部分止盈）
                 if out_sig == "BUY" and _pos == 0:
                     _pos = 1
                     _entry_price = c1
                     _entry_high = high1
+                    _entry_low = None
                     _tp1_done = False
                     _tp2_done = False
                     _remain_frac = 1.0
@@ -497,16 +505,19 @@ class MABreakoutBacktester:
                     if size_frac_suggest is not None and size_frac_suggest < 0.999:
                         _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
                         if _remain_frac <= 1e-6:
-                            _pos = 0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                            _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
                     else:
-                        _pos = 0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                        _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                elif out_sig == "SELL" and _pos == 0:
+                    # 回滚：空仓不再开空（仅做多）
+                    pass
 
             # 当根结束：计算净值变化（上一根仓位 * 本根涨跌 - 换手手续费）
-            cur_pos_frac = float(_remain_frac if _pos == 1 else 0.0)
+            cur_pos_frac = (float(_remain_frac) if _pos == 1 else (-float(_remain_frac) if _pos == -1 else 0.0))  # 改为带符号的持仓比例
             bar_ret = 0.0 if c0 is None or c1 is None else (c1 / c0 - 1.0)
             # ===== 基于合约的收益、成本与资金费 =====
-            IM = float(last_pos_frac)                                            # 初始保证金占比（上一根）
-            gross = float(last_pos_frac) * float(L) * float(bar_ret)             # 杠杆放大的毛收益（占比）
+            IM = float(abs(last_pos_frac))                                            # 初始保证金占比（上一根，使用绝对值）
+            gross = float(last_pos_frac) * float(L) * float(bar_ret)                 # 杠杆放大的毛收益（占比，带方向）
             # 先按策略意图计算换手，再根据是否强平做调整
             delta_pos_pre = abs(cur_pos_frac - last_pos_frac)
             cost_turn_pre = delta_pos_pre * cost_rate * float(L)                 # 成交成本（按名义额，即乘以L）
@@ -521,7 +532,7 @@ class MABreakoutBacktester:
                 cost_turn = delta_pos * cost_rate * float(L)
                 MB = IM + gross - fund_cost - cost_turn
                 net = (MB - IM) - float(liq_pen)
-                _pos = 0; _remain_frac = 0.0; _entry_price = None; _entry_high = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                _pos = 0; _remain_frac = 0.0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
             else:
                 delta_pos = delta_pos_pre
                 cost_turn = cost_turn_pre
@@ -687,7 +698,7 @@ def _parse_args() -> argparse.Namespace:
     # ===== 合约交易相关参数 =====
     p.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数（仅做多方向），>=1")
     p.add_argument("--funding_bps_8h", type=float, default=0.0, help="资金费率：每8小时的bp，可为负表示收取资金费")
-    p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%%")
+    p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%")
     p.add_argument("--liq_penalty_bps", type=float, default=10.0, help="强平附加惩罚（bp）")
     # ==========================
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")

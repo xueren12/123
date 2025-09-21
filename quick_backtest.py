@@ -8,8 +8,8 @@
    - download：用 CCXT 下载 OHLCV 到 CSV，然后立刻回测
    - offline：直接读取 data/ 下最新的 ohlcv_*.csv 回测
 2) 回测产物：
-   - data/backtest_ma_breakout.csv
-   - data/backtest_ma_breakout.svg
+   - data/backtest_multi_indicator.csv
+   - data/backtest_multi_indicator.svg
    - data/backtest_summary.json
 
 说明：
@@ -28,6 +28,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 import re
+import argparse
 
 # ====================== 可配置参数（按需修改） ======================
 CONFIG = {
@@ -41,7 +42,7 @@ CONFIG = {
     "inst": "ETH-USDT-SWAP",
 
     # K线周期：1m/5m/15m/1h/4h/1d 等
-    "timeframe": "15m",
+    "timeframe": "1m",
 
     # 新增：回测杠杆倍数（>=1，影响名义杠杆、资金费与换手成本的放大系数）
     "leverage": 20,
@@ -55,6 +56,9 @@ CONFIG = {
 
     # 数据目录
     "data_dir": "data",
+
+    # （可选）直接指定已有 CSV 文件路径；若填写将优先使用该文件并自动切换为离线模式
+    "csv_path": "",
 
     # 下载器相关参数
     "timeout": 30000,
@@ -89,11 +93,61 @@ def pick_latest_csv(data_dir: Path) -> Path | None:
     return files[0] if files else None
 
 
+def parse_args():
+    """解析命令行参数（支持将 CSV 文件路径作为位置参数或 --csv 传入）。"""
+    p = argparse.ArgumentParser(description="一键回测入口（支持以 CSV 文件路径作为参数）")
+    # 位置参数：直接给 CSV 文件路径即可
+    p.add_argument("csv", nargs="?", help="CSV 文件路径（可选，提供则直接离线回测该文件）")
+    # 可选参数：与位置参数等价
+    p.add_argument("--csv", dest="csv_opt", help="CSV 文件路径（等同于位置参数）")
+    return p.parse_args()
+
+
 def main() -> int:
+    # 解析命令行参数，支持以 CSV 路径一键离线回测
+    args = parse_args()
+    user_csv = (getattr(args, "csv_opt", None) or getattr(args, "csv", None))
+    user_csv_path = None
+    if user_csv:
+        p = Path(user_csv).expanduser()
+        if not p.exists():
+            print(f"错误：指定的 CSV 文件不存在：{p}")
+            input("按回车键退出...")
+            return 1
+        # 若传入了 CSV 文件，则强制进入离线模式
+        CONFIG["mode"] = "offline"
+        # 尝试从文件名解析 inst/timeframe/start/end（若不匹配则保持原配置）
+        m = re.search(r"ohlcv_(?P<inst>[^_]+)_(?P<tf>[^_]+)_(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})\\.csv$", p.name)
+        if m:
+            CONFIG["inst"] = m.group("inst")
+            CONFIG["timeframe"] = m.group("tf")
+            CONFIG["start"] = m.group("start")
+            CONFIG["end"] = m.group("end")
+        user_csv_path = p.resolve()
+    else:
+        # 未通过命令行提供 CSV，则尝试读取配置中的 csv_path
+        cfg_csv = (CONFIG.get("csv_path") or "").strip()
+        if cfg_csv:
+            p = Path(cfg_csv).expanduser()
+            if not p.is_absolute():
+                p = (PROJECT_DIR / p).resolve()  # 相对路径按项目根目录解析
+            if p.exists():
+                CONFIG["mode"] = "offline"  # 指定了文件则强制离线
+                m = re.search(r"ohlcv_(?P<inst>[^_]+)_(?P<tf>[^_]+)_(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})\\.csv$", p.name)
+                if m:
+                    CONFIG["inst"] = m.group("inst")
+                    CONFIG["timeframe"] = m.group("tf")
+                    CONFIG["start"] = m.group("start")
+                    CONFIG["end"] = m.group("end")
+                user_csv_path = p
+                print(f"检测到 CONFIG['csv_path']，将使用指定文件：{p}")
+            else:
+                print(f"警告：CONFIG['csv_path'] 指定的文件不存在：{p}，将回退到默认逻辑。")
+
     # 打印配置
     print("===== Python 一键回测 =====")
-    for k in ["mode", "exchange", "inst", "timeframe", "start", "end", "proxy", "data_dir"]:
-        print(f"{k}: {CONFIG[k]}")
+    for k in ["mode", "exchange", "inst", "timeframe", "start", "end", "proxy", "data_dir", "csv_path"]:
+        print(f"{k}: {CONFIG.get(k)}")
 
     data_dir = PROJECT_DIR / CONFIG["data_dir"]
     ensure_dir(data_dir)
@@ -113,7 +167,7 @@ def main() -> int:
     if CONFIG["mode"].lower() == "download":
         print("\n===== 下载阶段 =====")
         download_cmd = [
-            sys.executable, "-u", str(PROJECT_DIR / "mvp" / "scripts" / "download_ohlcv_okx.py"),
+            "py", "-u", str(PROJECT_DIR / "mvp" / "scripts" / "download_ohlcv_okx.py"),
             "--engine", "ccxt",
             "--ccxt-exchange", CONFIG["exchange"],
             "--inst", CONFIG["inst"],
@@ -143,13 +197,18 @@ def main() -> int:
 
     else:
         print("\n===== 离线模式 =====")
-        latest = pick_latest_csv(data_dir)
-        if not latest:
-            print("错误：未在 data/ 目录中找到任何 *ohlcv*.csv 文件。请先切换到 download 模式或手动放置 CSV。")
-            input("按回车键退出...")
-            return 1
-        csv_path = latest
-        print(f"使用最新文件: {csv_path.name}")
+        if user_csv_path:
+            # 优先使用用户通过参数传入的 CSV 文件
+            csv_path = user_csv_path
+            print(f"使用指定文件: {csv_path.name}")
+        else:
+            latest = pick_latest_csv(data_dir)
+            if not latest:
+                print("错误：未在 data/ 目录中找到任何 *ohlcv*.csv 文件。请先切换到 download 模式或手动放置 CSV。")
+                input("按回车键退出...")
+                return 1
+            csv_path = latest
+            print(f"使用最新文件: {csv_path.name}")
 
     # 2) 回测阶段
     print("\n===== 回测阶段 =====")
@@ -157,7 +216,7 @@ def main() -> int:
     backtest_timeframe = CONFIG["timeframe"].replace("m", "min")
 
     backtest_cmd = [
-        sys.executable, "-u", str(PROJECT_DIR / "mvp" / "backtest" / "ma_backtest.py"),
+        "py", "-u", str(PROJECT_DIR / "mvp" / "backtest" / "ma_backtest.py"),
         "--source", "csv",
         "--csv", str(csv_path),
         "--inst", backtest_inst,
@@ -190,8 +249,8 @@ def main() -> int:
     out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_base}"
 
     products = [
-        out_dir / "backtest_ma_breakout.csv",
-        out_dir / "backtest_ma_breakout.svg",
+        out_dir / "backtest_multi_indicator.csv",
+        out_dir / "backtest_multi_indicator.svg",
         out_dir / "backtest_summary.json",
     ]
 

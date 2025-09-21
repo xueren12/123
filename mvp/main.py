@@ -166,7 +166,7 @@ class SystemOrchestrator:
     def _warmup_kline(self, insts: List[str]) -> None:
         """根据 timeframe 与指标窗口，预填充最少所需根数的 K 线到 trades 表（以模拟成交写入）。"""
         try:
-            tf_env = os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min")
+            tf_env = os.getenv("MA_TIMEFRAME")
             sec_per_bar = self._timeframe_seconds(tf_env)
             if sec_per_bar <= 0:
                 sec_per_bar = 60.0
