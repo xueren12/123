@@ -87,6 +87,7 @@ class MABacktestConfig:
     aroon_buy: float = 70.0
     aroon_sell: float = 30.0
     confirm_min: int = 3
+    sell_cooldown_sec: float = 0.0
 
 
 class MABreakoutBacktester:
@@ -101,11 +102,12 @@ class MABreakoutBacktester:
         except Exception:
             start_str = "start"
             end_str = "end"
-        tf_str = str(cfg.timeframe).strip().replace("/", "-")
-        # 在目录名中加入 inst（仅取基础币种，如 ETH-USDT/ETH/USDT → ETH）
-        inst_base = str(cfg.inst).upper().replace("-SWAP", "")
-        inst_base = inst_base.split("-")[0].split("/")[0]
-        self.output_dir = _os.path.join("data", f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_base}")
+        # 统一规范：timeframe 使用标准 'Nmin' 标签
+        tf_label, _ = self._parse_timeframe(cfg.timeframe)
+        tf_str = str(tf_label).strip().replace("/", "-")
+        # 目录中使用完整 inst 以便区分（保留 -SWAP，去除斜杠）
+        inst_label = str(cfg.inst).upper().replace("/", "-")
+        self.output_dir = _os.path.join("data", f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_label}")
         _os.makedirs(self.output_dir, exist_ok=True)
 
     @staticmethod
@@ -380,6 +382,12 @@ class MABreakoutBacktester:
             int(self.cfg.aroon_period + 1),
             int(atr_period + 5),
         )
+        # 新增：与实盘对齐的卖出冷却与同bar去重状态
+        sell_cooldown_sec = float(getattr(self.cfg, "sell_cooldown_sec", 0.0) or 0.0)
+        last_sell_epoch = None  # 上次卖出发生时间（秒）
+        last_exit_bar_ts = None  # 上次全平发生的bar时间戳
+        last_partial_exit_reason_ts: dict = {}  # 各原因的上次部分平时间戳（bar级）
+        trade_logs = []  # 统一交易日志输出（ts, inst, side, price, sizeFrac, reason）
 
         for i, t in enumerate(idx):
             c1 = float(close.iloc[i]) if pd.notna(close.iloc[i]) else None
@@ -401,6 +409,8 @@ class MABreakoutBacktester:
 
             out_sig = "HOLD"
             size_frac_suggest = None
+            sell_reason = None
+            buy_reason = None
 
             if i >= (min_need - 1) and c1 is not None:
                 # 多指标确认
@@ -419,9 +429,9 @@ class MABreakoutBacktester:
                 sell_confirms = int(macd_bear_ok) + int(bb_bear_ok) + int(rsi_bear_ok) + int(aroon_bear_ok)
                 need = int(max(1, min(4, int(self.cfg.confirm_min))))
                 if buy_confirms >= need and buy_confirms > sell_confirms:
-                    out_sig = "BUY"
+                    out_sig = "BUY"; buy_reason = "entry_multi_indicator"
                 elif sell_confirms >= need and sell_confirms > buy_confirms:
-                    out_sig = "SELL"
+                    out_sig = "SELL"; sell_reason = "indicator_exit_full"; size_frac_suggest = float(_remain_frac or 1.0)
 
                 # 止盈（仅多头）
                 tp_triggered = False
@@ -436,20 +446,20 @@ class MABreakoutBacktester:
                     if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
                         aroon_rev = (a_up0 >= a_dn0) and (a_dn1 > a_up1)
                     if aroon_rev and (_remain_frac is None or _remain_frac > 0):
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_aroon_reversal"
                     # 移动止损
                     if (not tp_triggered) and _trail_stop is not None and c1 <= float(_trail_stop):
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_trailing"
                     # R 倍数分批止盈
                     if (not tp_triggered) and _init_risk is not None and _init_risk > 0:
                         r_mult = (c1 - float(_entry_price)) / float(_init_risk)
                         if (not _tp2_done) and r_mult >= 2.0 and (_remain_frac or 0.0) > 0:
-                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp2_done = True
+                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp2_done = True; sell_reason = "takeprofit_r_multiple_2.0"
                         elif (not _tp1_done) and r_mult >= 1.0 and (_remain_frac or 0.0) > 0:
-                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp1_done = True
+                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp1_done = True; sell_reason = "takeprofit_r_multiple_1.0"
                     # RSI 技术止盈（部分）
                     if (not tp_triggered) and rsi1 is not None and (rsi1 >= 80.0 or rsi1 <= 20.0):
-                        out_sig = "SELL"; size_frac_suggest = float(min(0.2, float(_remain_frac or 1.0)))
+                        out_sig = "SELL"; size_frac_suggest = float(min(0.2, float(_remain_frac or 1.0))); sell_reason = "takeprofit_rsi_partial"
 
                 # 回滚：移除空头止盈止损逻辑（仅做多）
                 if _pos < 0:
@@ -478,39 +488,89 @@ class MABreakoutBacktester:
                         if (not np.isnan(bb_low1) and c1 < bb_low1) or macd_cross_dn2:
                             stop_hit = True
                     if stop_hit:
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0)
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); sell_reason = "stoploss_full"
 
+                # 与实盘一致的卖出冷却与同bar去重（在状态更新前判定）
+                if out_sig == "SELL":
+                    try:
+                        ts_epoch = t.to_pydatetime().timestamp()
+                    except Exception:
+                        ts_epoch = pd.Timestamp(t).timestamp()
+                    is_partial = (size_frac_suggest is not None and size_frac_suggest < 0.999)
+                    if sell_cooldown_sec > 0.0 and (last_sell_epoch is not None) and ((ts_epoch - float(last_sell_epoch)) < float(sell_cooldown_sec)):
+                        # 冷却时间内阻断卖出
+                        out_sig = "HOLD"; size_frac_suggest = None; sell_reason = None
+                    else:
+                        # 同bar去重：全平严格；部分平按原因
+                        if is_partial:
+                            if sell_reason is not None and last_partial_exit_reason_ts.get(sell_reason) == t:
+                                out_sig = "HOLD"; size_frac_suggest = None; sell_reason = None
+                        else:
+                            if last_exit_bar_ts == t:
+                                out_sig = "HOLD"; size_frac_suggest = None; sell_reason = None
 
                 # 状态更新（支持部分止盈）
+                pre_pos = _pos
+                sell_size_to_log = None
+                if out_sig == "SELL" and pre_pos == 1:
+                    sell_size_to_log = float(size_frac_suggest) if size_frac_suggest is not None else float(_remain_frac or 1.0)
                 if out_sig == "BUY" and _pos == 0:
-                    _pos = 1
-                    _entry_price = c1
-                    _entry_high = high1
-                    _entry_low = None
-                    _tp1_done = False
-                    _tp2_done = False
-                    _remain_frac = 1.0
-                    _trail_stop = None
-                    # 入场时估算初始风险 R
-                    eff_stop = None
-                    if atr1 is not None and atr1 > 0:
-                        eff_stop = max(eff_stop or -1e18, float(_entry_price) - 2.0 * float(atr1))
-                    sym = str(self.cfg.inst).upper()
-                    pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
-                    stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
-                    if stop_pct is not None and stop_pct > 0:
-                        eff_stop = max(eff_stop or -1e18, float(_entry_price) * (1.0 - float(stop_pct)))
-                    _init_risk = (float(_entry_price) - eff_stop) if (eff_stop is not None and eff_stop < float(_entry_price)) else float(_entry_price) * 0.01
+                     _pos = 1
+                     _entry_price = c1
+                     _entry_high = high1
+                     _entry_low = None
+                     _tp1_done = False
+                     _tp2_done = False
+                     _remain_frac = 1.0
+                     _trail_stop = None
+                     # 入场时估算初始风险 R
+                     eff_stop = None
+                     if atr1 is not None and atr1 > 0:
+                         eff_stop = max(eff_stop or -1e18, float(_entry_price) - 2.0 * float(atr1))
+                     sym = str(self.cfg.inst).upper()
+                     pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                     stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                     if stop_pct is not None and stop_pct > 0:
+                         eff_stop = max(eff_stop or -1e18, float(_entry_price) * (1.0 - float(stop_pct)))
+                     _init_risk = (float(_entry_price) - eff_stop) if (eff_stop is not None and eff_stop < float(_entry_price)) else float(_entry_price) * 0.01
+                     # 记录BUY交易日志
+                     trade_logs.append({
+                        "ts": t.isoformat(),
+                        "inst": self.cfg.inst,
+                        "side": "BUY",
+                        "price": float(c1) if c1 is not None else np.nan,
+                        "sizeFrac": 1.0,
+                        "reason": buy_reason or "entry_multi_indicator"
+                    })
                 elif out_sig == "SELL" and _pos == 1:
-                    if size_frac_suggest is not None and size_frac_suggest < 0.999:
-                        _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
-                        if _remain_frac <= 1e-6:
-                            _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
-                    else:
-                        _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                     if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                         _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
+                         if _remain_frac <= 1e-6:
+                             _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                     else:
+                         _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                     # 卖出成功：更新冷却/去重状态并记录trade_log
+                     try:
+                         ts_epoch = t.to_pydatetime().timestamp()
+                     except Exception:
+                         ts_epoch = pd.Timestamp(t).timestamp()
+                     last_sell_epoch = ts_epoch
+                     if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                         if sell_reason:
+                             last_partial_exit_reason_ts[sell_reason] = t
+                     else:
+                         last_exit_bar_ts = t
+                     trade_logs.append({
+                         "ts": t.isoformat(),
+                         "inst": self.cfg.inst,
+                         "side": "SELL",
+                         "price": float(c1) if c1 is not None else np.nan,
+                         "sizeFrac": float(sell_size_to_log) if sell_size_to_log is not None else float(_remain_frac or 0.0),
+                         "reason": sell_reason or "unknown"
+                     })
                 elif out_sig == "SELL" and _pos == 0:
-                    # 回滚：空仓不再开空（仅做多）
-                    pass
+                     # 回滚：空仓不再开空（仅做多）
+                     pass
 
             # 当根结束：计算净值变化（上一根仓位 * 本根涨跌 - 换手手续费）
             cur_pos_frac = (float(_remain_frac) if _pos == 1 else (-float(_remain_frac) if _pos == -1 else 0.0))  # 改为带符号的持仓比例
@@ -566,8 +626,22 @@ class MABreakoutBacktester:
 
         stats = self._summary_stats(df)
         self._export(df)
-        
-        # 新增：计算胜率（winrate）并写出回测汇总 JSON，供 gradual_deploy.py 阈值检查使用
+        # 导出统一交易日志（与实盘 trade_log.csv 对齐字段）
+        try:
+            tl_path = _os.path.join(self.output_dir, "trade_log.csv")
+            _os.makedirs(_os.path.dirname(tl_path), exist_ok=True)
+            if len(trade_logs) > 0:
+                tl_df = pd.DataFrame(trade_logs)
+                tl_df.to_csv(tl_path, index=False)
+                logger.info("已导出交易日志CSV：{}", tl_path)
+            else:
+                # 若无交易也创建空文件，便于自动流程读取
+                pd.DataFrame(columns=["ts","inst","side","price","sizeFrac","reason"]).to_csv(tl_path, index=False)
+                logger.info("无交易，已生成空交易日志CSV：{}", tl_path)
+        except Exception as e:
+            logger.warning("导出交易日志失败：{}", e)
+         
+         # 新增：计算胜率（winrate）并写出回测汇总 JSON，供 gradual_deploy.py 阈值检查使用
         # 计算规则：将连续持仓区间视为一笔交易（pos!=0 的连续片段），以该区间净收益(ret)之和判断盈亏
         try:
             pos_series = df["pos"].fillna(0.0)
@@ -703,6 +777,7 @@ def _parse_args() -> argparse.Namespace:
     # ==========================
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")
     p.add_argument("--plot", type=int, default=1, help="是否导出SVG图：1是 0否")
+    p.add_argument("--sell_cooldown_sec", type=float, default=0.0, help="卖出冷却秒数（与实盘保持一致）")
     # 新策略参数（若提供则覆盖旧参数所映射的默认值）
     p.add_argument("--macd_fast", type=int, default=None, help="MACD EMA 快线窗口")
     p.add_argument("--macd_slow", type=int, default=None, help="MACD EMA 慢线窗口")
@@ -788,6 +863,7 @@ if __name__ == "__main__":
         aroon_buy=aroon_buy,
         aroon_sell=aroon_sell,
         confirm_min=confirm_min,
+        sell_cooldown_sec=float(args.sell_cooldown_sec),
     )
     bt = MABreakoutBacktester(cfg)
     res = bt.run()

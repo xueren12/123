@@ -42,14 +42,15 @@ CONFIG = {
     "inst": "ETH-USDT-SWAP",
 
     # K线周期：1m/5m/15m/1h/4h/1d 等
-    "timeframe": "1m",
+    "timeframe": "15m",
 
     # 新增：回测杠杆倍数（>=1，影响名义杠杆、资金费与换手成本的放大系数）
-    "leverage": 20,
+    "leverage": 10,
 
     # 起止日期（UTC）
     "start": "2025-06-01",
-    "end": "2025-09-16",
+    "end": "2025-10-21",
+
 
     # 代理（如无需代理留空）。形如 "http://127.0.0.1:7890"
     "proxy": "http://127.0.0.1:7890",
@@ -209,10 +210,20 @@ def main() -> int:
                 return 1
             csv_path = latest
             print(f"使用最新文件: {csv_path.name}")
+        # 二次从最终 csv_path 解析并覆盖配置，确保目录命名与传参一致
+        try:
+            m2 = re.search(r"ohlcv_(?P<inst>[^_]+)_(?P<tf>[^_]+)_(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})\.csv$", csv_path.name)
+            if m2:
+                CONFIG["inst"] = m2.group("inst")
+                CONFIG["timeframe"] = m2.group("tf")
+                CONFIG["start"] = m2.group("start")
+                CONFIG["end"] = m2.group("end")
+        except Exception:
+            pass
 
     # 2) 回测阶段
     print("\n===== 回测阶段 =====")
-    backtest_inst = CONFIG["inst"].replace("-SWAP", "")
+    backtest_inst = CONFIG["inst"]
     backtest_timeframe = CONFIG["timeframe"].replace("m", "min")
 
     backtest_cmd = [
@@ -243,10 +254,9 @@ def main() -> int:
     except Exception:
         m = re.search(r"(\d{4})[^0-9]?(\d{2})[^0-9]?(\d{2})", CONFIG["end"]) ; end_str = "".join(m.groups()) if m else "end"
     tf_str = CONFIG["timeframe"].replace("m", "min")
-    # 在目录名中加入 inst（仅取基础币种，如 ETH-USDT-SWAP/ETH-USDT/ETH → ETH）
-    inst_base = CONFIG["inst"].upper().replace("-SWAP", "")
-    inst_base = inst_base.split("-")[0].split("/")[0]
-    out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_base}"
+    # 在目录名中加入 inst（使用完整合约名，保留 -SWAP，去除斜杠）
+    inst_label = CONFIG["inst"].upper().replace("/", "-")
+    out_dir = data_dir / f"start_{start_str}_end_{end_str}_tf_{tf_str}_inst_{inst_label}"
 
     products = [
         out_dir / "backtest_multi_indicator.csv",

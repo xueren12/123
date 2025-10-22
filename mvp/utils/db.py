@@ -142,6 +142,39 @@ class TimescaleDB:
                 """
             )
 
+            # 新增：策略持仓与盈亏事件表
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_positions (
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    inst_id TEXT NOT NULL,
+                    pos_frac NUMERIC NOT NULL,
+                    avg_entry_px NUMERIC,
+                    source TEXT DEFAULT 'strategy',
+                    extra JSONB
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pnl_events (
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    inst_id TEXT NOT NULL,
+                    side TEXT,
+                    qty NUMERIC,
+                    entry_px NUMERIC,
+                    exit_px NUMERIC,
+                    pnl_quote NUMERIC,
+                    pnl_pct NUMERIC,
+                    order_id TEXT,
+                    reason TEXT,
+                    approx BOOLEAN DEFAULT FALSE,
+                    source TEXT DEFAULT 'executor',
+                    extra JSONB
+                );
+                """
+            )
+
             # 若可用，则转换为 hypertable
             try:
                 cur.execute("SELECT create_hypertable('trades', 'ts', if_not_exists => TRUE);")
@@ -158,6 +191,10 @@ class TimescaleDB:
             # 新增索引：审计日志按时间与类型查询
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_event ON audit_logs(event_type);")
+            # 新增索引：策略持仓与盈亏事件
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_positions_inst_ts ON strategy_positions(inst_id, ts DESC);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_pnl_inst_ts ON pnl_events(inst_id, ts DESC);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_pnl_ts ON pnl_events(ts DESC);")
             logger.success("数据库表结构初始化完成")
 
     # ----------------------------
@@ -243,6 +280,64 @@ class TimescaleDB:
                 payload,
             )
         logger.debug("已写审计事件：event_type={} module={} action={}", payload.get("event_type"), payload.get("module"), payload.get("action"))
+        return 1
+
+    def insert_strategy_position(self, row: Dict[str, Any]) -> int:
+        """写入策略持仓快照到 strategy_positions 表。"""
+        self._ensure_connected()
+        assert self.conn is not None, "数据库未连接"
+        payload = dict(row)
+        if "extra" in payload and payload["extra"] is not None:
+            payload["extra"] = Json(payload["extra"])
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO strategy_positions (ts, inst_id, pos_frac, avg_entry_px, source, extra)
+                VALUES (COALESCE(%(ts)s, NOW()), %(inst_id)s, %(pos_frac)s, %(avg_entry_px)s, COALESCE(%(source)s, 'strategy'), %(extra)s)
+                """,
+                payload,
+            )
+        logger.debug("已写持仓快照：{} pos_frac={} avg_entry_px={}", payload.get("inst_id"), payload.get("pos_frac"), payload.get("avg_entry_px"))
+        return 1
+
+    def fetch_latest_position_frac(self, inst_id: str) -> Optional[Dict[str, Any]]:
+        """查询指定交易对最新的策略持仓快照（若无返回 None）。"""
+        self._ensure_connected()
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, inst_id, pos_frac, avg_entry_px
+                FROM strategy_positions
+                WHERE inst_id=%s
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                (inst_id,),
+            )
+            row = cur.fetchone()
+        return row
+
+    def insert_pnl_event(self, row: Dict[str, Any]) -> int:
+        """写入盈亏事件到 pnl_events 表。"""
+        self._ensure_connected()
+        assert self.conn is not None, "数据库未连接"
+        payload = dict(row)
+        if "extra" in payload and payload["extra"] is not None:
+            payload["extra"] = Json(payload["extra"])
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO pnl_events (
+                    ts, inst_id, side, qty, entry_px, exit_px, pnl_quote, pnl_pct, order_id, reason, approx, source, extra
+                ) VALUES (
+                    COALESCE(%(ts)s, NOW()), %(inst_id)s, %(side)s, %(qty)s, %(entry_px)s, %(exit_px)s, %(pnl_quote)s, %(pnl_pct)s,
+                    %(order_id)s, %(reason)s, COALESCE(%(approx)s, FALSE), COALESCE(%(source)s, 'executor'), %(extra)s)
+                )
+                """,
+                payload,
+            )
+        logger.info("已写盈亏事件：{} side={} pnl_quote={}", payload.get("inst_id"), payload.get("side"), payload.get("pnl_quote"))
         return 1
 
     @staticmethod

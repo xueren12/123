@@ -616,15 +616,18 @@ class TradeExecutor:
         ord_type = meta.get("ordType", "market")
         price_str = f"{signal.price}" if signal.price is not None else None
         # 下单数量在发送前按交易所手数步进与最小值进行规整，避免“数量非手数倍数”
-        aligned_size = float(signal.size)
+        # 原始信号尺寸（现货为币数量；合约需转换为张数）
+        raw_size = float(signal.size)
+        aligned_size = raw_size
         try:
             inst = str(signal.symbol)
             # 简单判定产品类型：两段为现货，>=三段或以 -SWAP 结尾视为合约/永续
             parts = inst.split("-")
             inst_type = "SPOT" if len(parts) == 2 else "SWAP"
-            # 查询品种规则（含 lotSz/minSz）
+            # 查询品种规则（含 lotSz/minSz/ctVal）
             lot_sz: Optional[float] = None
             min_sz: Optional[float] = None
+            ct_val: Optional[float] = None
             if self.client is not None:
                 resp_rules = self.client.get_instruments(inst_type=inst_type, inst_id=inst)
                 if resp_rules.ok and isinstance(resp_rules.data, list):
@@ -638,29 +641,45 @@ class TradeExecutor:
                                 min_sz = float(it.get("minSz")) if it.get("minSz") is not None else None
                             except Exception:
                                 min_sz = None
+                            try:
+                                ct_val = float(it.get("ctVal")) if it.get("ctVal") is not None else None
+                            except Exception:
+                                ct_val = None
                             break
+            # 合约：将币数量转换为合约张数（张数 = 币数量 / ctVal）
+            if inst_type == "SWAP":
+                if ct_val is not None and ct_val > 0:
+                    aligned_size = raw_size / float(ct_val)
+                else:
+                    # 缺少合约面值时，将输入 size 视为“张数”
+                    aligned_size = raw_size
+            # 默认步进兜底：若为合约/永续且未拿到 lotSz，则按 1 合约取整
+            if (lot_sz is None or lot_sz <= 0) and inst_type == "SWAP":
+                lot_sz = 1.0
             # 按步进向下取整，保证为手数倍数
             if lot_sz is not None and lot_sz > 0:
                 step = float(lot_sz)
                 k = math.floor(aligned_size / step + 1e-12)
                 aligned_size = k * step
-            # 不能低于最小下单数量
-            if min_sz is not None and aligned_size < min_sz:
-                # 写失败日志并返回错误（避免被交易所拒单）
-                self._append_log({
-                    "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
-                    "price": signal.price, "size": signal.size, "reason": f"size_below_minSz(minSz={min_sz})", "ok": False,
-                    "order_id": None, "exchange_code": "-1", "exchange_msg": "size < minSz", "raw": "{}",
-                })
-                return ExecResult(ok=False, mode=self.mode, signal=signal, err=f"size<{min_sz}")
-            # 若规整后非正数，同样拒绝下单
-            if aligned_size <= 0:
-                self._append_log({
-                    "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
-                    "price": signal.price, "size": signal.size, "reason": "size_non_positive_after_align", "ok": False,
-                    "order_id": None, "exchange_code": "-1", "exchange_msg": "size<=0 after align", "raw": "{}",
-                })
-                return ExecResult(ok=False, mode=self.mode, signal=signal, err="size<=0 after align")
+            # 不能低于最小下单数量（仅对开仓 buy/sell，close 将在后续分支重算）
+            is_close = str(signal.side).lower() == "close"
+            if not is_close:
+                if min_sz is not None and aligned_size < min_sz:
+                    # 写失败日志并返回错误（避免被交易所拒单）
+                    self._append_log({
+                        "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                        "price": signal.price, "size": signal.size, "reason": f"size_below_minSz(minSz={min_sz})", "ok": False,
+                        "order_id": None, "exchange_code": "-1", "exchange_msg": "size < minSz", "raw": "{}",
+                    })
+                    return ExecResult(ok=False, mode=self.mode, signal=signal, err=f"size<{min_sz}")
+                # 若规整后非正数，同样拒绝下单
+                if aligned_size <= 0:
+                    self._append_log({
+                        "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                        "price": signal.price, "size": signal.size, "reason": "size_non_positive_after_align", "ok": False,
+                        "order_id": None, "exchange_code": "-1", "exchange_msg": "size<=0 after align", "raw": "{}",
+                    })
+                    return ExecResult(ok=False, mode=self.mode, signal=signal, err="size<=0 after align")
         except Exception as e:
             # 规整失败不阻断，仅记录调试信息，继续使用原始 size（可能被交易所拒单）
             logger.debug("下单数量规整异常（忽略）：{}", e)
@@ -787,13 +806,13 @@ class TradeExecutor:
             # 动态决定 close 方向：查询实盘持仓决定 buy/sell（单向模式用净头寸，双向模式用分腿）
             decided_side = None
             decided_pos_side = None
+            long_qty = 0.0
+            short_qty = 0.0
+            has_hedge = False
             if is_derivative:
                 try:
                     pos_resp = self.client.get_positions(inst_id=signal.symbol)
                     if getattr(pos_resp, "ok", False) and isinstance(getattr(pos_resp, "data", None), list):
-                        long_qty = 0.0
-                        short_qty = 0.0
-                        has_hedge = False
                         for it in pos_resp.data:
                             try:
                                 ps = str(it.get("posSide") or "").lower()
@@ -830,7 +849,81 @@ class TradeExecutor:
                             elif net < 0:
                                 decided_side = "buy"; decided_pos_side = "short" if has_hedge else None
                 except Exception as e:
-                    logger.warning("查询持仓以决定 close 方向失败，将使用默认方向：{}", e)
+                    logger.warning("查询持仓以决定 close 方向失败：{}", e)
+            # 若无法确定方向，则跳过下单（避免 reduceOnly 默认方向导致 51169）
+            if is_derivative and decided_side is None:
+                self._append_log({
+                    "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                    "price": signal.price, "size": signal.size, "reason": signal.reason, "ok": False,
+                    "order_id": None, "exchange_code": "-1", "exchange_msg": "close_direction_unknown", "raw": "{}",
+                })
+                return ExecResult(ok=False, mode=self.mode, signal=signal, err="close_direction_unknown")
+            # 基于实盘持仓与 sizeFrac 计算 close 的张数，并按步进/最小值对齐
+            if is_derivative:
+                # 选择需要关闭的持仓腿（双向）或净头寸（单向）
+                try:
+                    if decided_pos_side == "long":
+                        base_qty = float(long_qty)
+                    elif decided_pos_side == "short":
+                        base_qty = float(short_qty)
+                    else:
+                        base_qty = abs(float(long_qty) - float(short_qty))
+                except Exception:
+                    base_qty = 0.0
+                # 读取部分平仓比例
+                frac = 1.0
+                try:
+                    v = meta.get("sizeFrac") if isinstance(meta, dict) else None
+                    if v is not None:
+                        fv = float(v)
+                        if 0.0 < fv < 1.0:
+                            frac = fv
+                except Exception:
+                    pass
+                target_close = max(0.0, base_qty * frac)
+                # 获取规则并对齐步进/最小值
+                lot_sz2: Optional[float] = None
+                min_sz2: Optional[float] = None
+                try:
+                    resp_rules2 = self.client.get_instruments(inst_type="SWAP", inst_id=signal.symbol)
+                    if getattr(resp_rules2, "ok", False) and isinstance(resp_rules2.data, list):
+                        for it2 in resp_rules2.data:
+                            if str(it2.get("instId")) == signal.symbol:
+                                try:
+                                    lot_sz2 = float(it2.get("lotSz")) if it2.get("lotSz") is not None else None
+                                except Exception:
+                                    lot_sz2 = None
+                                try:
+                                    min_sz2 = float(it2.get("minSz")) if it2.get("minSz") is not None else None
+                                except Exception:
+                                    min_sz2 = None
+                                break
+                except Exception:
+                    pass
+                if (lot_sz2 is None or lot_sz2 <= 0):
+                    lot_sz2 = 1.0
+                if lot_sz2 is not None and lot_sz2 > 0:
+                    step2 = float(lot_sz2)
+                    k2 = math.floor(target_close / step2 + 1e-12)
+                    target_close = k2 * step2
+                if min_sz2 is not None and target_close < min_sz2:
+                    self._append_log({
+                        "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                        "price": signal.price, "size": signal.size, "reason": f"close_size_below_minSz(minSz={min_sz2})", "ok": False,
+                        "order_id": None, "exchange_code": "-1", "exchange_msg": "close size < minSz", "raw": "{}",
+                    })
+                    return ExecResult(ok=False, mode=self.mode, signal=signal, err="close size < minSz")
+                if target_close <= 0:
+                    self._append_log({
+                        "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": signal.side,
+                        "price": signal.price, "size": signal.size, "reason": "close_size_non_positive_after_align", "ok": False,
+                        "order_id": None, "exchange_code": "-1", "exchange_msg": "close size<=0 after align", "raw": "{}",
+                    })
+                    return ExecResult(ok=False, mode=self.mode, signal=signal, err="close size<=0 after align")
+                # 覆盖最终下单尺寸（张数）
+                aligned_size = float(target_close)
+                sz_str = f"{aligned_size}"
+            # 设置最终方向和 posSide
             side = decided_side or ("sell" if side == "close" else side)
             if is_derivative and decided_pos_side:
                 _extra.setdefault("posSide", decided_pos_side)
@@ -894,6 +987,91 @@ class TradeExecutor:
         self.guard.check_and_maybe_trip(signal.symbol, side, p0, p1)
 
         if not resp.ok:
+            # 针对数量非手数倍数（51121）：尝试查询规则后重新规整并重试一次
+            try:
+                code = str(resp.code)
+            except Exception:
+                code = ""
+            if code == "51121":
+                try:
+                    inst = str(signal.symbol)
+                    parts = inst.split("-")
+                    inst_type = "SPOT" if len(parts) == 2 else "SWAP"
+                    lot_sz2: Optional[float] = None
+                    min_sz2: Optional[float] = None
+                    if self.client is not None:
+                        rules_resp = self.client.get_instruments(inst_type=inst_type, inst_id=inst)
+                        if getattr(rules_resp, "ok", False) and isinstance(getattr(rules_resp, "data", None), list):
+                            for it in rules_resp.data:
+                                if str(it.get("instId")) == inst:
+                                    try:
+                                        lot_sz2 = float(it.get("lotSz")) if it.get("lotSz") is not None else None
+                                    except Exception:
+                                        lot_sz2 = None
+                                    try:
+                                        min_sz2 = float(it.get("minSz")) if it.get("minSz") is not None else None
+                                    except Exception:
+                                        min_sz2 = None
+                                    break
+                    # 默认步进兜底：SWAP 缺规则时按 1 合约取整
+                    if (lot_sz2 is None or lot_sz2 <= 0) and inst_type == "SWAP":
+                        lot_sz2 = 1.0
+                    adj = float(signal.size)
+                    if lot_sz2 is not None and lot_sz2 > 0:
+                        step = float(lot_sz2)
+                        k = math.floor(adj / step + 1e-12)
+                        adj = k * step
+                    # 若有 minSz 约束则校验
+                    if min_sz2 is not None and adj < min_sz2:
+                        # 写日志记录重试失败原因
+                        self._append_log({
+                            "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": side,
+                            "price": signal.price, "size": signal.size, "reason": f"retry_51121_below_minSz(minSz={min_sz2})", "ok": False,
+                            "order_id": None, "exchange_code": "51121", "exchange_msg": "retry size < minSz", "raw": json_trunc(resp.raw),
+                        })
+                        return ExecResult(ok=False, mode=self.mode, signal=signal, exchange_resp=resp.raw, err=resp.msg)
+                    if adj <= 0:
+                        self._append_log({
+                            "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": side,
+                            "price": signal.price, "size": signal.size, "reason": "retry_51121_size_non_positive", "ok": False,
+                            "order_id": None, "exchange_code": "51121", "exchange_msg": "retry size<=0", "raw": json_trunc(resp.raw),
+                        })
+                        return ExecResult(ok=False, mode=self.mode, signal=signal, exchange_resp=resp.raw, err=resp.msg)
+
+                    retry_sz_str = f"{adj}"
+                    retry_resp2: OKXResponse = self.client.place_order(
+                        inst_id=signal.symbol,
+                        side=side,
+                        ord_type=ord_type,
+                        px=price_str,
+                        sz=retry_sz_str,
+                        td_mode=meta.get("tdMode"),
+                        tgt_ccy=meta.get("tgtCcy"),
+                        cl_ord_id=meta.get("clOrdId"),
+                        tp_trigger_px=(str(meta.get("tpTriggerPx")) if meta.get("tpTriggerPx") is not None else None),
+                        tp_ord_px=(str(meta.get("tpOrdPx")) if meta.get("tpOrdPx") is not None else None),
+                        sl_trigger_px=(str(meta.get("slTriggerPx")) if meta.get("slTriggerPx") is not None else None),
+                        sl_ord_px=(str(meta.get("slOrdPx")) if meta.get("slOrdPx") is not None else None),
+                        tp_trigger_px_type=meta.get("tpTriggerPxType"),
+                        sl_trigger_px_type=meta.get("slTriggerPxType"),
+                        extra=_extra,
+                    )
+                    if getattr(retry_resp2, "ok", False):
+                        r_order_id2 = None
+                        try:
+                            if isinstance(retry_resp2.data, list) and retry_resp2.data:
+                                r_order_id2 = retry_resp2.data[0].get("ordId") or retry_resp2.data[0].get("algoId")
+                        except Exception:
+                            pass
+                        self._append_log({
+                            "ts": signal.ts.isoformat(), "mode": self.mode, "symbol": signal.symbol, "side": side,
+                            "price": signal.price, "size": signal.size, "reason": signal.reason, "ok": True,
+                            "order_id": r_order_id2, "exchange_code": retry_resp2.code, "exchange_msg": retry_resp2.msg, "raw": json_trunc(retry_resp2.raw),
+                            "retry_fix_51121": True,
+                        })
+                        return ExecResult(ok=True, mode=self.mode, signal=signal, exchange_resp=retry_resp2.raw, order_id=r_order_id2)
+                except Exception as e:
+                    logger.warning("处理 51121 重试时发生异常：{}", e)
             # 针对 reduceOnly 与方向不匹配（51170）做一次纠偏重试：刷新持仓并反向提交 close
             try:
                 code = str(resp.code)

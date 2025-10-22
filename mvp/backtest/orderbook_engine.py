@@ -98,6 +98,10 @@ class OBBTConfig:
     fills_csv: Optional[str] = None                # 成交明细 CSV
     report_csv: Optional[str] = None               # 权益/指标 CSV
     plot_svg: Optional[str] = None                 # 收益曲线 SVG
+    # 新增：与实盘对齐的约束与外部驱动
+    sell_cooldown_sec: float = 0.0                 # 卖出冷却秒数
+    actions_csv: Optional[str] = None              # 外部动作驱动CSV（来自 multi_indicator 的 trade_log.csv）
+    trade_log_csv: Optional[str] = None            # 输出的交易日志CSV（执行侧实际成交）
 
 
 @dataclass
@@ -110,6 +114,9 @@ class Order:
     price: Optional[float]    # 限价价格（market 时为 None）
     placed_ts: datetime       # 订单生效（放入簿）的时间（考虑延迟后）
     remaining: float          # 剩余未成交数量
+    # 新增：动作元数据，便于统一日志输出
+    reason: Optional[str] = None
+    size_frac: Optional[float] = None
 
 
 @dataclass
@@ -338,11 +345,39 @@ class OrderBookBacktester:
         # 时间索引
         index = ob_df.index
 
+        # 新增：外部动作驱动映射与冷却/去重状态
+        actions_map: Dict[pd.Timestamp, List[dict]] = {}
+        if getattr(self.cfg, "actions_csv", None):
+            try:
+                a_df = pd.read_csv(self.cfg.actions_csv)
+                if "ts" not in a_df.columns:
+                    logger.warning("actions_csv 缺少 ts 列，忽略外部动作驱动")
+                else:
+                    try:
+                        a_df["ts"] = pd.to_datetime(a_df["ts"], utc=True)
+                    except Exception:
+                        a_df["ts"] = pd.to_datetime(a_df["ts"].astype("int64"), unit="ms", utc=True)
+                    # 过滤标的与时间窗
+                    if "inst" in a_df.columns:
+                        a_df = a_df[a_df["inst"].astype(str) == str(self.cfg.inst_id)]
+                    a_df = a_df[(a_df["ts"] >= index.min()) & (a_df["ts"] <= index.max())]
+                    a_df = a_df.sort_values("ts")
+                    for ts_val, grp in a_df.groupby("ts"):
+                        actions_map[ts_val] = grp.to_dict(orient="records")
+                    logger.info("已加载外部动作CSV，共{}条（{}个时间点）", len(a_df), len(actions_map))
+            except Exception as e:
+                logger.warning("读取 actions_csv 失败：{}", e)
+        sell_cooldown_sec = float(getattr(self.cfg, "sell_cooldown_sec", 0.0) or 0.0)
+        last_sell_epoch = None
+        last_exit_bar_ts: Optional[pd.Timestamp] = None
+        last_partial_exit_reason_ts: Dict[str, pd.Timestamp] = {}
+        exec_trade_logs: List[dict] = []
+
         # 下单延迟：信号发生在 bar 的结束时刻，订单在 (ts + latency) 生效
-        def schedule_order(ts: pd.Timestamp, side: str, qty: float, price: Optional[float], typ: str) -> None:
+        def schedule_order(ts: pd.Timestamp, side: str, qty: float, price: Optional[float], typ: str, reason: Optional[str] = None, size_frac: Optional[float] = None) -> None:
             placed_ts = (ts.to_pydatetime().astimezone(timezone.utc) + timedelta(milliseconds=int(self.cfg.latency_ms)))
             oid = f"{typ}-{side}-{int(ts.timestamp()*1e6)}"
-            self.scheduled.append(Order(oid, side, typ, abs(qty), price, placed_ts, abs(qty)))
+            self.scheduled.append(Order(oid, side, typ, abs(qty), price, placed_ts, abs(qty), reason, size_frac))
 
         last_target = 0.0
         equity_series: List[float] = []
@@ -354,24 +389,70 @@ class OrderBookBacktester:
             best_bid = row.get("best_bid", np.nan)
             best_ask = row.get("best_ask", np.nan)
 
-            # 1) 根据目标持仓与当前持仓生成调仓订单（在 bar 结束时刻触发，延迟后到簿）
-            tgt = float(target_pos.loc[ts])
-            if not math.isclose(tgt, last_target, rel_tol=0, abs_tol=1e-12):
-                delta = tgt - self.pos
-                if abs(delta) > 1e-12:
-                    if self.cfg.exec == "market":
-                        schedule_order(ts, "BUY" if delta > 0 else "SELL", abs(delta), None, "market")
-                    else:
-                        # 在 best 边挂单，偏移 limit_offset_bps
-                        if delta > 0:  # 想加多 -> 买单挂在 bid 一侧更保守，或直接以 ask 一侧？此处选择在 bid 侧偏下
-                            base = float(best_bid) if math.isfinite(best_bid) else float(row["mid"])  # 兜底
-                            price = base * (1.0 - self.cfg.limit_offset_bps / 10000.0)
-                            schedule_order(ts, "BUY", abs(delta), price, "limit")
+            # 1) 外部动作驱动或原有目标调仓
+            if actions_map:
+                acts = actions_map.get(ts, [])
+                for act in acts:
+                    side = str(act.get("side", "")).upper()
+                    reason = str(act.get("reason")) if ("reason" in act) else None
+                    try:
+                        size_frac = float(act.get("sizeFrac", 1.0)) if ("sizeFrac" in act) else 1.0
+                    except Exception:
+                        size_frac = 1.0
+                    if side not in ("BUY", "SELL"):
+                        continue
+                    if side == "SELL":
+                        ts_epoch = ts_dt.timestamp()
+                        is_partial = size_frac < 0.999
+                        # 冷却限制
+                        if sell_cooldown_sec > 0.0 and (last_sell_epoch is not None) and ((ts_epoch - float(last_sell_epoch)) < float(sell_cooldown_sec)):
+                            continue
+                        # 同bar去重
+                        if is_partial:
+                            if reason is not None and last_partial_exit_reason_ts.get(reason) == ts:
+                                continue
+                        else:
+                            if last_exit_bar_ts == ts:
+                                continue
+                        qty = (self.pos * float(size_frac)) if is_partial else self.pos
+                        if qty <= 1e-12:
+                            continue
+                        if self.cfg.exec == "market":
+                            schedule_order(ts, "SELL", float(qty), None, "market", reason, float(size_frac))
                         else:
                             base = float(best_ask) if math.isfinite(best_ask) else float(row["mid"])  # 兜底
                             price = base * (1.0 + self.cfg.limit_offset_bps / 10000.0)
-                            schedule_order(ts, "SELL", abs(delta), price, "limit")
-                last_target = tgt
+                            schedule_order(ts, "SELL", float(qty), price, "limit", reason, float(size_frac))
+                    else:  # BUY
+                        tgt_units = float(self.cfg.trade_units)
+                        qty = max(0.0, tgt_units - self.pos)
+                        if qty <= 1e-12:
+                            continue
+                        if self.cfg.exec == "market":
+                            schedule_order(ts, "BUY", float(qty), None, "market", reason or "entry_multi_indicator", 1.0)
+                        else:
+                            base = float(best_bid) if math.isfinite(best_bid) else float(row["mid"])  # 兜底
+                            price = base * (1.0 - self.cfg.limit_offset_bps / 10000.0)
+                            schedule_order(ts, "BUY", float(qty), price, "limit", reason or "entry_multi_indicator", 1.0)
+            else:
+                # 原有：根据目标持仓变化调仓
+                tgt = float(target_pos.loc[ts])
+                if not math.isclose(tgt, last_target, rel_tol=0, abs_tol=1e-12):
+                    delta = tgt - self.pos
+                    if abs(delta) > 1e-12:
+                        if self.cfg.exec == "market":
+                            schedule_order(ts, "BUY" if delta > 0 else "SELL", abs(delta), None, "market", "engine_target_adjust", None)
+                        else:
+                            # 在 best 边挂单，偏移 limit_offset_bps
+                            if delta > 0:  # 想加多
+                                base = float(best_bid) if math.isfinite(best_bid) else float(row["mid"])  # 兜底
+                                price = base * (1.0 - self.cfg.limit_offset_bps / 10000.0)
+                                schedule_order(ts, "BUY", abs(delta), price, "limit", "engine_target_adjust", None)
+                            else:
+                                base = float(best_ask) if math.isfinite(best_ask) else float(row["mid"])  # 兜底
+                                price = base * (1.0 + self.cfg.limit_offset_bps / 10000.0)
+                                schedule_order(ts, "SELL", abs(delta), price, "limit", "engine_target_adjust", None)
+                    last_target = tgt
 
             # 2) 处理“到时生效”的订单（只在首次达到其 placed_ts 的快照时进入簿）
             ready: List[Order] = []
@@ -385,6 +466,7 @@ class OrderBookBacktester:
 
             # 市价单：在当前快照即时撮合
             for od in [o for o in ready if o.type == "market"]:
+                pre_pos = self.pos
                 exec_qty, vwap, notional = self._consume_market(bids, asks, od.side, od.remaining)
                 if exec_qty > 0:
                     px, fee = self._apply_fee_and_slip(od.side, vwap, exec_qty)
@@ -392,12 +474,36 @@ class OrderBookBacktester:
                     if od.side == "BUY":
                         self.cash -= exec_qty * px + fee
                         self.pos += exec_qty
+                        exec_trade_logs.append({
+                            "ts": ts_dt.isoformat(),
+                            "inst": self.cfg.inst_id,
+                            "side": "BUY",
+                            "price": float(px),
+                            "sizeFrac": 1.0,
+                            "reason": od.reason or f"exec_{od.type}"
+                        })
                     else:
                         self.cash += exec_qty * px - fee
                         self.pos -= exec_qty
+                        last_sell_epoch = ts_dt.timestamp()
+                        if od.size_frac is not None and od.size_frac < 0.999:
+                            if od.reason:
+                                last_partial_exit_reason_ts[od.reason] = ts
+                        else:
+                            last_exit_bar_ts = ts
+                        size_f = float(exec_qty / pre_pos) if pre_pos > 1e-12 else 0.0
+                        size_f = float(min(1.0, max(0.0, size_f)))
+                        exec_trade_logs.append({
+                            "ts": ts_dt.isoformat(),
+                            "inst": self.cfg.inst_id,
+                            "side": "SELL",
+                            "price": float(px),
+                            "sizeFrac": size_f,
+                            "reason": od.reason or f"exec_{od.type}"
+                        })
                     self.fills.append(Fill(ts_dt, od.order_id, od.side, exec_qty, px, fee, od.type, px))
                     od.remaining -= exec_qty
-                # 市价剩余视为未能成交，直接丢弃（也可改为滚动到下根快照重试）
+                # 市价剩余视为未能成交，直接丢弃
 
             # 限价单：若已有在簿订单，则检测是否被穿越；若没有且 ready 中有 limit，则取一张最新的入簿
             if self.active_limit is None:
@@ -407,15 +513,40 @@ class OrderBookBacktester:
                     self.active_limit = ready_limits[-1]
             # 检测穿越并撮合
             if self.active_limit is not None:
+                pre_pos = self.pos
                 exec_qty, vwap, notional = self._cross_limit(bids, asks, self.active_limit)
                 if exec_qty > 0:
                     px, fee = self._apply_fee_and_slip(self.active_limit.side, vwap, exec_qty)
                     if self.active_limit.side == "BUY":
                         self.cash -= exec_qty * px + fee
                         self.pos += exec_qty
+                        exec_trade_logs.append({
+                            "ts": ts_dt.isoformat(),
+                            "inst": self.cfg.inst_id,
+                            "side": "BUY",
+                            "price": float(px),
+                            "sizeFrac": 1.0,
+                            "reason": self.active_limit.reason or f"exec_{self.active_limit.type}"
+                        })
                     else:
                         self.cash += exec_qty * px - fee
                         self.pos -= exec_qty
+                        last_sell_epoch = ts_dt.timestamp()
+                        if self.active_limit.size_frac is not None and self.active_limit.size_frac < 0.999:
+                            if self.active_limit.reason:
+                                last_partial_exit_reason_ts[self.active_limit.reason] = ts
+                        else:
+                            last_exit_bar_ts = ts
+                        size_f = float(exec_qty / pre_pos) if pre_pos > 1e-12 else 0.0
+                        size_f = float(min(1.0, max(0.0, size_f)))
+                        exec_trade_logs.append({
+                            "ts": ts_dt.isoformat(),
+                            "inst": self.cfg.inst_id,
+                            "side": "SELL",
+                            "price": float(px),
+                            "sizeFrac": size_f,
+                            "reason": self.active_limit.reason or f"exec_{self.active_limit.type}"
+                        })
                     self.fills.append(Fill(ts_dt, self.active_limit.order_id, self.active_limit.side, exec_qty, px, fee, self.active_limit.type, px))
                     self.active_limit.remaining -= exec_qty
                     if self.active_limit.remaining <= 1e-12:
@@ -492,6 +623,15 @@ class OrderBookBacktester:
             plt.close(fig)
             logger.info("已生成回测图表 SVG -> {}", self.cfg.plot_svg)
 
+        # 新增：导出统一交易日志（若提供 trade_log_csv 路径）
+        if getattr(self.cfg, "trade_log_csv", None):
+            try:
+                _safe_makedirs(os.path.dirname(self.cfg.trade_log_csv))
+                pd.DataFrame(exec_trade_logs).to_csv(self.cfg.trade_log_csv, index=False)
+                logger.info("已导出执行侧交易日志 CSV -> {}", self.cfg.trade_log_csv)
+            except Exception as e:
+                logger.warning("导出执行侧交易日志失败：{}", e)
+
         return summary
 
 
@@ -523,6 +663,10 @@ def parse_args() -> OBBTConfig:
     p.add_argument("--fills-csv", dest="fills_csv", default=None)
     p.add_argument("--report-csv", dest="report_csv", default=None)
     p.add_argument("--plot-svg", dest="plot_svg", default=None)
+    # 新增：与实盘一致的冷却与外部动作驱动
+    p.add_argument("--sell-cooldown-sec", dest="sell_cooldown_sec", type=float, default=0.0, help="卖出冷却秒数")
+    p.add_argument("--actions-csv", dest="actions_csv", default=None, help="外部动作CSV（来自多指标回测的 trade_log.csv）")
+    p.add_argument("--trade-log-csv", dest="trade_log_csv", default=None, help="输出的执行侧交易日志CSV路径")
 
     a = p.parse_args()
     return OBBTConfig(
@@ -544,6 +688,9 @@ def parse_args() -> OBBTConfig:
         fills_csv=a.fills_csv,
         report_csv=a.report_csv,
         plot_svg=a.plot_svg,
+        sell_cooldown_sec=a.sell_cooldown_sec,
+        actions_csv=a.actions_csv,
+        trade_log_csv=a.trade_log_csv,
     )
 
 

@@ -304,25 +304,54 @@ class MABreakoutStrategy:
         a_dn1 = (float(aroon_down.iloc[-1]) if not np.isnan(float(aroon_down.iloc[-1])) else None)
         a_dn0 = (float(aroon_down.iloc[-2]) if not np.isnan(float(aroon_down.iloc[-2])) else None)
 
+        # —— 收盘确认使用的指标取值：全部采用上一根“已收盘”K线 ——
+        # 说明：为了避免盘中“重绘”，以下用于开/反向信号确认的指标，统一使用上一根已收盘K线（索引 -2），
+        #       交叉类判断使用上一根及其再上一根（-2 与 -3）。风控（止损/止盈）仍使用最新价（索引 -1）。
+        cbar = float(close.iloc[-2]) if not np.isnan(float(close.iloc[-2])) else float('nan')
+        macd1c = float(macd_line.iloc[-2]) if not np.isnan(float(macd_line.iloc[-2])) else float('nan')
+        macd0c = float(macd_line.iloc[-3]) if not np.isnan(float(macd_line.iloc[-3])) else float('nan')
+        sig1c = float(macd_signal.iloc[-2]) if not np.isnan(float(macd_signal.iloc[-2])) else float('nan')
+        sig0c = float(macd_signal.iloc[-3]) if not np.isnan(float(macd_signal.iloc[-3])) else float('nan')
+        bb_up_c = float(bb_upper.iloc[-2])
+        bb_low_c = float(bb_lower.iloc[-2])
+        _rsi_tmp_c = float(rsi.iloc[-2]) if not np.isnan(float(rsi.iloc[-2])) else float('nan')
+        rsi1c = None if np.isnan(_rsi_tmp_c) else _rsi_tmp_c
+        a_up1c = (float(aroon_up.iloc[-2]) if not np.isnan(float(aroon_up.iloc[-2])) else None)
+        a_up0c = (float(aroon_up.iloc[-3]) if not np.isnan(float(aroon_up.iloc[-3])) else None)
+        a_dn1c = (float(aroon_down.iloc[-2]) if not np.isnan(float(aroon_down.iloc[-2])) else None)
+        a_dn0c = (float(aroon_down.iloc[-3]) if not np.isnan(float(aroon_down.iloc[-3])) else None)
+
+        # —— 计算信号对应的bar收盘时间（上一根bar的收盘时刻）——
+        # pandas 重采样的索引一般为bar起始时间，这里将上一根已收盘bar的起始时间加上一个bar的秒数，得到其“收盘时间”。
+        try:
+            _, sec_per_bar = self._parse_timeframe(self.cfg.timeframe)
+        except Exception:
+            sec_per_bar = 60
+        try:
+            prev_bar_start_ts = close.index[-2].to_pydatetime()
+        except Exception:
+            prev_bar_start_ts = close.index[-2]
+        prev_bar_close_ts = prev_bar_start_ts + timedelta(seconds=int(sec_per_bar))
+
         # ============ 多重确认逻辑 ==========  # 补回缺失的确认布尔量定义
-        # MACD 确认：金叉/死叉 或者 位于信号线上下且方向一致
-        macd_cross_up = (macd0 <= sig0) and (macd1 > sig1)
-        macd_cross_dn = (macd0 >= sig0) and (macd1 < sig1)
-        macd_bull_ok = (macd_cross_up or (macd1 > sig1 and macd1 > 0))
-        macd_bear_ok = (macd_cross_dn or (macd1 < sig1 and macd1 < 0))
+        # MACD 确认：金叉/死叉 或者 位于信号线上下且方向一致（使用上根已收盘K线）
+        macd_cross_up = (macd0c <= sig0c) and (macd1c > sig1c)
+        macd_cross_dn = (macd0c >= sig0c) and (macd1c < sig1c)
+        macd_bull_ok = (macd_cross_up or (macd1c > sig1c and macd1c > 0))
+        macd_bear_ok = (macd_cross_dn or (macd1c < sig1c and macd1c < 0))
 
-        # 布林带确认：突破上轨/下轨
-        bb_bull_ok = (False if np.isnan(bb_up1) else (c1 > bb_up1))
-        bb_bear_ok = (False if np.isnan(bb_low1) else (c1 < bb_low1))
+        # 布林带确认：突破上轨/下轨（使用上根已收盘K线）
+        bb_bull_ok = (False if np.isnan(bb_up_c) else (cbar > bb_up_c))
+        bb_bear_ok = (False if np.isnan(bb_low_c) else (cbar < bb_low_c))
 
-        # RSI 确认：多头 >= rsi_buy；空头 <= rsi_sell
-        rsi_bull_ok = (rsi1 is not None) and (rsi1 >= float(self.cfg.rsi_buy))
-        rsi_bear_ok = (rsi1 is not None) and (rsi1 <= float(self.cfg.rsi_sell))
+        # RSI 确认：多头 >= rsi_buy；空头 <= rsi_sell（使用上根已收盘K线）
+        rsi_bull_ok = (rsi1c is not None) and (rsi1c >= float(self.cfg.rsi_buy))
+        rsi_bear_ok = (rsi1c is not None) and (rsi1c <= float(self.cfg.rsi_sell))
 
-        # Aroon 确认：Up 高且领先；Down 高且领先
+        # Aroon 确认：Up 高且领先；Down 高且领先（使用上根已收盘K线）
         bear_thresh = max(float(self.cfg.aroon_buy), 100.0 - float(self.cfg.aroon_sell))
-        aroon_bull_ok = (a_up1 is not None and a_dn1 is not None) and (a_up1 >= float(self.cfg.aroon_buy)) and (a_up1 > a_dn1)
-        aroon_bear_ok = (a_up1 is not None and a_dn1 is not None) and (a_dn1 >= bear_thresh) and (a_dn1 > a_up1)
+        aroon_bull_ok = (a_up1c is not None and a_dn1c is not None) and (a_up1c >= float(self.cfg.aroon_buy)) and (a_up1c > a_dn1c)
+        aroon_bear_ok = (a_up1c is not None and a_dn1c is not None) and (a_dn1c >= bear_thresh) and (a_dn1c > a_up1c)
 
         # 统计确认数
         buy_confirms = int(macd_bull_ok) + int(bb_bull_ok) + int(rsi_bull_ok) + int(aroon_bull_ok)
@@ -331,7 +360,7 @@ class MABreakoutStrategy:
         # 中文调试日志：打印确认统计
         logger.info("确认统计：inst_id={}, timeframe={}, buy_confirms={}, sell_confirms={}, 需要={}", self.cfg.inst_id, self.cfg.timeframe, buy_confirms, sell_confirms, need)
 
-        # 生成“基础信号”：至少满足确认数，且方向上不“打架”
+        # 生成“基础信号”：至少满足确认数，且方向上不“打架”（基于已收盘K线的确认）
         if buy_confirms >= need and buy_confirms > sell_confirms:
             base_sig = "BUY"
         elif sell_confirms >= need and sell_confirms > buy_confirms:
@@ -341,6 +370,10 @@ class MABreakoutStrategy:
 
         reason = "multi_indicator"
         out_sig = base_sig
+        # 长仅守卫：空仓的 SELL 不开空，改为 HOLD（与回测一致）
+        if out_sig == "SELL" and (self._pos is None or self._pos <= 0):
+            logger.info("[长仅守卫] inst_id={} 空仓 SELL 改为 HOLD", self.cfg.inst_id)
+            out_sig = "HOLD"
         size_frac_suggest: Optional[float] = None  # 建议的部分平仓比例（仅在 SELL 且部分平仓时给出）
 
         # ============ 止盈模块（TakeProfit）============
@@ -499,16 +532,30 @@ class MABreakoutStrategy:
             # 状态更新失败不影响信号输出
             pass
 
+        # —— 输出时点与指标取值语义 ——
+        # 基础交易信号（reason=multi_indicator）：
+        #   - ts 使用上一根bar的“收盘时间”，确保“收盘之后的信号作为交易信号”。
+        #   - 指标字段（close/fast/slow/brk_*）使用上一根“已收盘”bar的值，避免盘中重绘。
+        # 风控/止盈止损（reason=takeprofit_* 或 stoploss_*）：
+        #   - ts 使用当前最新bar索引（近似即时），指标字段使用最新值，确保风控及时。
+        is_base = (reason == "multi_indicator")
+        ts_out = (prev_bar_close_ts if is_base else close.index[-1].to_pydatetime())
+        close_out = float(cbar if is_base else c1)
+        fast_out = float(macd1c if is_base else macd1)
+        slow_out = float(sig1c if is_base else sig1)
+        brk_high_out = float(bb_up_c if is_base else bb_up1)
+        brk_low_out = float(bb_low_c if is_base else bb_low1)
+
         return {
-            "ts": close.index[-1].to_pydatetime(),
+            "ts": ts_out,
             "inst_id": self.cfg.inst_id,
             "timeframe": self.cfg.timeframe,
             "signal": out_sig,
-            "close": float(c1),
-            "fast": float(macd1),
-            "slow": float(sig1),
-            "brk_high": float(bb_up1),
-            "brk_low": float(bb_low1),
+            "close": close_out,
+            "fast": fast_out,
+            "slow": slow_out,
+            "brk_high": brk_high_out,
+            "brk_low": brk_low_out,
             "reason": reason,
             # 建议部分平仓比例（仅 SELL 且部分平仓时非空）；执行层可选使用
             "size_frac": (float(size_frac_suggest) if size_frac_suggest is not None else None),

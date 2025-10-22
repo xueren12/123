@@ -83,6 +83,17 @@ class SystemOrchestrator:
             logger.info("按根数冷却覆盖：cooldown_bars={} timeframe={} -> cooldown_sec={}", bars, tf, self.cooldown_sec)
         # 记录各标的最近一次下单时间戳（秒）
         self._last_trade_ts: Dict[str, float] = {}
+        # 记录各标的最近一次“基础信号”已处理的bar收盘时间，避免同一bar重复下单
+        self._last_signal_bar_ts: Dict[str, Any] = {}
+        self._last_exit_bar_ts: Dict[str, Any] = {}
+        # 同bar部分平仓去重：记录各标的各原因最近一次部分平仓的bar时间
+        self._last_partial_exit_reason_ts: Dict[str, Dict[str, Any]] = {}
+        # 卖出短冷却（秒级，避免抖动连发）
+        try:
+            self.sell_cooldown_sec: float = float(os.getenv("SELL_COOLDOWN_SEC", "5"))
+        except Exception:
+            self.sell_cooldown_sec = 5.0
+        self._last_sell_ts: Dict[str, float] = {}
         # 虚拟持仓：按策略目标持仓记录（BUY=+1，SELL=-1，HOLD=延续），仅用于日志观测
         self._virt_pos: Dict[str, float] = {}
         # 采集任务与策略缓存
@@ -360,6 +371,13 @@ class SystemOrchestrator:
                 aroon_period=int(os.getenv("AROON_PERIOD", "14")),
                 # 新增：显式设置策略 timeframe，确保与预填口径一致
                 timeframe=(os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min")),
+                # —— 风控参数：使用前面计算好的值 ——
+                atr_n=atr_n_val,
+                stop_loss_pct_btc=sl_btc_val,
+                stop_loss_pct_eth=sl_eth_val,
+                tp_frac1=tp_frac1_val,
+                tp_frac2=tp_frac2_val,
+                tp_trail_atr_mult=trail_atr_val,
             )
             self._strategies[inst] = MABreakoutStrategy(strat_cfg)
         return self._strategies[inst]
@@ -392,6 +410,29 @@ class SystemOrchestrator:
 
                         side = str(sig.get("signal", "")).upper()
                         if side in ("BUY", "SELL"):
+                            # —— 每根K线仅处理一次基础信号（reason=multi_indicator） ——
+                            try:
+                                reason = str(sig.get("reason") or "")
+                                sig_ts = sig.get("ts")
+                            except Exception:
+                                reason = ""
+                                sig_ts = None
+                            if reason == "multi_indicator" and sig_ts is not None:
+                                last_bar_ts = self._last_signal_bar_ts.get(inst)
+                                # 若上一根已处理的bar时间与当前信号时间一致，则跳过重复下单
+                                if last_bar_ts is not None:
+                                    try:
+                                        same_bar = bool(sig_ts == last_bar_ts)
+                                    except Exception:
+                                        same_bar = False
+                                    if same_bar:
+                                        try:
+                                            ts_str = sig_ts.isoformat() if hasattr(sig_ts, "isoformat") else str(sig_ts)
+                                        except Exception:
+                                            ts_str = str(sig_ts)
+                                        logger.info("[同一bar跳过] {} ts={} 已处理过基础信号，跳过重复下单", inst, ts_str)
+                                        continue
+
                             # 冷却判定：若设置了冷却且尚未到期则跳过
                             if self.cooldown_sec > 0:
                                 last_ts = self._last_trade_ts.get(inst, 0.0)
@@ -456,9 +497,15 @@ class SystemOrchestrator:
                             ts = sig.get("ts")
                             ord_type = str(sig.get("ord_type", "market")).lower()
                             meta = {"ordType": ord_type}
+                            # 交易模式：逐仓（isolated）。如为现货则保持 cash
+                            try:
+                                parts = inst.split("-")
+                                is_derivative = (len(parts) >= 3) or inst.endswith("-SWAP")
+                                meta["tdMode"] = ("isolated" if is_derivative else "cash")
+                            except Exception:
+                                meta["tdMode"] = "isolated"
                             # 止损开关：若设置了环境变量 DISABLE_SL=1，则不附带止损参数
                             disable_sl_env = str(os.getenv("DISABLE_SL", "0")).strip() == "1"
-                            # 删除“回测对齐”相关逻辑：实盘逻辑不再受回测影响，仅保留环境变量控制
                             disable_sl = disable_sl_env
                             # 透传策略建议止损价 -> 风控/执行可利用（slTriggerPx 或 slOrdPx）
                             if (not disable_sl) and (sig.get("sl") is not None):
@@ -477,8 +524,81 @@ class SystemOrchestrator:
                                 pass
                             reason = sig.get("reason") or "multi_indicator"
 
-                            # 统一方向小写（不再进行“回测对齐”的 SELL->close 语义转换）
-                            ts_side = side.lower()
+                            # 长仅模式：空仓的 SELL 不开空；有持仓的 SELL 转为 close（仅平仓）
+                            try:
+                                row = self.db.fetch_latest_position_frac(inst)
+                                virt_pos = float(row["pos_frac"]) if (row and row.get("pos_frac") is not None) else 0.0
+                            except Exception:
+                                try:
+                                    virt_pos = float(self._virt_pos.get(inst, 0.0))
+                                except Exception:
+                                    virt_pos = 0.0
+                            sell_close_reason = False
+                            try:
+                                r = str(reason or "")
+                                sell_close_reason = r.startswith("takeprofit") or r.startswith("stoploss") or (size_frac is not None)
+                            except Exception:
+                                sell_close_reason = (size_frac is not None)
+                            if side == "SELL":
+                                if virt_pos <= 1e-8 and not sell_close_reason:
+                                    logger.info("[跳过下单] {} 长仅模式：空仓 SELL 不开空", inst)
+                                    continue
+                                ts_side = "close"
+                            else:
+                                ts_side = side.lower()
+
+                            # SELL短冷却：避免抖动连发（秒级）
+                            if side == "SELL" and self.sell_cooldown_sec > 0:
+                                try:
+                                    last_sell_ts = float(self._last_sell_ts.get(inst, 0.0))
+                                except Exception:
+                                    last_sell_ts = 0.0
+                                if last_sell_ts and (time.time() - last_sell_ts) < self.sell_cooldown_sec:
+                                    remain = max(0.0, self.sell_cooldown_sec - (time.time() - last_sell_ts))
+                                    logger.info("[SELL冷却中] {} 信号={}，剩余 {:.1f}s 跳过下单", inst, side, remain)
+                                    continue
+
+                            # 同bar去重（细化）：全平严格去重；部分平仅对同因由去重
+                            if side == "SELL" and sell_close_reason and ts is not None:
+                                # 判断是否部分平仓
+                                is_partial = False
+                                try:
+                                    frac = float(size_frac) if size_frac is not None else None
+                                    is_partial = (frac is not None) and (0.0 < frac < 0.999)
+                                except Exception:
+                                    is_partial = False
+
+                                if not is_partial:
+                                    # 全平：若该bar已有成功平仓，则跳过重复平仓信号
+                                    try:
+                                        last_exit_ts = self._last_exit_bar_ts.get(inst)
+                                    except Exception:
+                                        last_exit_ts = None
+                                    same_bar_exit = False
+                                    try:
+                                        same_bar_exit = bool(last_exit_ts == ts)
+                                    except Exception:
+                                        same_bar_exit = False
+                                    if same_bar_exit:
+                                        ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                                        logger.info("[同一bar全平去重] {} ts={} 已完成一次平仓，跳过重复平仓", inst, ts_str)
+                                        continue
+                                else:
+                                    # 部分平：按原因去重（允许同bar不同原因的级联部分止盈）
+                                    try:
+                                        per_inst = self._last_partial_exit_reason_ts.get(inst, {})
+                                    except Exception:
+                                        per_inst = {}
+                                    last_ts_same_reason = per_inst.get(str(reason or ""))
+                                    same_bar_partial = False
+                                    try:
+                                        same_bar_partial = bool(last_ts_same_reason == ts)
+                                    except Exception:
+                                        same_bar_partial = False
+                                    if same_bar_partial:
+                                        ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                                        logger.info("[同一bar部分平去重] {} ts={} reason={} 已执行，跳过重复", inst, ts_str, reason)
+                                        continue
 
                             trade_sig = TradeSignal(
                                 ts=ts, symbol=inst, side=ts_side, price=None,
@@ -490,30 +610,119 @@ class SystemOrchestrator:
                                 logger.success("[下单成功] {} {} size={} order_id={}", inst, side, used_size, res.order_id)
                                 # 成功后记录冷却时间戳
                                 self._last_trade_ts[inst] = time.time()
-                                # 更新虚拟持仓并输出
+                                # 若为基础信号，记录本bar已处理，防重复
                                 try:
-                                    # 对于 BUY：视为建仓 -> pos = 1
-                                    if side == "BUY":
-                                        self._virt_pos[inst] = 1.0
-                                    else:  # SELL：根据 reason 与 size_frac 判断是否为部分止盈/止损
-                                        r = str(reason)
-                                        if r.startswith("takeprofit") or r.startswith("stoploss"):
-                                            try:
-                                                frac = float(size_frac) if size_frac is not None else None
-                                            except Exception:
-                                                frac = None
-                                            if frac is not None and 0.0 < frac < 1.0:
-                                                cur = float(self._virt_pos.get(inst, 1.0))
-                                                self._virt_pos[inst] = max(0.0, cur * (1.0 - frac))
-                                            else:
-                                                # 视为全平
-                                                self._virt_pos[inst] = 0.0
-                                        else:
-                                            # 其他 SELL（例如反转做空）维持原逻辑
-                                            self._virt_pos[inst] = -1.0
-                                    logger.info("[虚拟持仓] {} pos={}", inst, self._virt_pos[inst])
+                                    if reason == "multi_indicator" and ts is not None:
+                                        self._last_signal_bar_ts[inst] = ts
                                 except Exception:
                                     pass
+                                # 记录SELL冷却与同bar平仓完成（细化：全平 vs 部分平）
+                                try:
+                                    if side == "SELL":
+                                        # SELL 成功：更新秒级冷却
+                                        try:
+                                            self._last_sell_ts[inst] = time.time()
+                                        except Exception:
+                                            pass
+                                        # 风控/平仓信号：按部分/全平分别记录去重状态
+                                        if sell_close_reason and ts is not None:
+                                            # 判断是否部分平仓
+                                            is_partial = False
+                                            try:
+                                                frac = float(size_frac) if size_frac is not None else None
+                                                is_partial = (frac is not None) and (0.0 < frac < 0.999)
+                                            except Exception:
+                                                is_partial = False
+                                            if is_partial:
+                                                # 记录该因由在本bar已部分平仓
+                                                try:
+                                                    per_inst = self._last_partial_exit_reason_ts.get(inst)
+                                                    if per_inst is None:
+                                                        per_inst = {}
+                                                    per_inst[str(reason or "")] = ts
+                                                    self._last_partial_exit_reason_ts[inst] = per_inst
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                # 全平：记录本bar已全平
+                                                self._last_exit_bar_ts[inst] = ts
+                                except Exception:
+                                    pass
+                                # 更新数据库持仓与盈亏记录（替代虚拟持仓）
+                                try:
+                                    # 优先尝试获取真实成交均价（仅在实盘且拿到 order_id 时）
+                                    fill_px = None
+                                    try:
+                                        if self.executor.mode == "real" and getattr(self.executor, "client", None) is not None and res.order_id:
+                                            ord = self.executor.client.get_order(inst_id=inst, ord_id=res.order_id)
+                                            if getattr(ord, "ok", False) and isinstance(ord.data, list) and len(ord.data) > 0:
+                                                avg_px_str = ord.data[0].get("avgPx") or ord.data[0].get("px")
+                                                if avg_px_str is not None:
+                                                    fill_px = float(avg_px_str)
+                                    except Exception:
+                                        pass
+                                    # 回退：最近成交价
+                                    last_px = None
+                                    try:
+                                        last_px = self.executor.get_last_price(inst)
+                                    except Exception:
+                                        pass
+                                    ref_px = fill_px if fill_px is not None else last_px
+                                    new_frac = None
+                                    if side == "BUY":
+                                        new_frac = 1.0
+                                        self.db.insert_strategy_position({
+                                            "ts": ts,
+                                            "inst_id": inst,
+                                            "pos_frac": new_frac,
+                                            "avg_entry_px": ref_px,
+                                            "source": "strategy",
+                                            "extra": {"order_id": res.order_id, "reason": reason}
+                                        })
+                                    else:
+                                        r = str(reason or "")
+                                        try:
+                                            frac = float(size_frac) if size_frac is not None else None
+                                        except Exception:
+                                            frac = None
+                                        cur_row = self.db.fetch_latest_position_frac(inst)
+                                        cur_frac = float(cur_row["pos_frac"]) if (cur_row and cur_row.get("pos_frac") is not None) else 1.0
+                                        avg_entry = float(cur_row["avg_entry_px"]) if (cur_row and cur_row.get("avg_entry_px") is not None) else None
+                                        pnl_quote = None
+                                        pnl_pct = None
+                                        exit_px = ref_px
+                                        if avg_entry and exit_px:
+                                            try:
+                                                eff_frac = frac if (frac is not None and 0.0 < frac < 1.0) else cur_frac
+                                                pnl_pct = (exit_px - avg_entry) / avg_entry
+                                                if used_size is not None and isinstance(used_size, (int, float)):
+                                                    pnl_quote = float(used_size) * (exit_px - avg_entry)
+                                            except Exception:
+                                                pass
+                                        if r.startswith("takeprofit") or r.startswith("stoploss"):
+                                            if frac is not None and 0.0 < frac < 1.0:
+                                                new_frac = max(0.0, cur_frac * (1.0 - frac))
+                                            else:
+                                                new_frac = 0.0
+                                        else:
+                                            new_frac = 0.0
+                                        self.db.insert_strategy_position({
+                                            "ts": ts, "inst_id": inst,
+                                            "pos_frac": new_frac,
+                                            "avg_entry_px": (avg_entry if new_frac > 0 else None),
+                                            "source": "strategy",
+                                            "extra": {"order_id": res.order_id, "reason": reason}
+                                        })
+                                        self.db.insert_pnl_event({
+                                            "ts": ts, "inst_id": inst, "side": "SELL",
+                                            "qty": used_size, "entry_px": avg_entry, "exit_px": exit_px,
+                                            "pnl_quote": pnl_quote, "pnl_pct": pnl_pct,
+                                            "order_id": res.order_id, "reason": reason,
+                                            "approx": (fill_px is None), "source": "strategy", "extra": {"sizeFrac": size_frac}
+                                        })
+                                    logger.info("[持仓快照] {} pos_frac={}", inst, new_frac)
+                                except Exception:
+                                    logger.exception("更新数据库持仓/盈亏失败：{} {}", inst, reason)
                             else:
                                 logger.error("[下单失败] {} {} size={} err={}", inst, side, used_size, res.err)
                         else:
