@@ -54,7 +54,7 @@ class MABacktestConfig:
     inst: str
     start: datetime
     end: datetime
-    timeframe: str = "5min"
+    timeframe: str = "15min"
     # 旧参数（兼容用，不再直接用于信号计算）
     fast: int = 10
     slow: int = 30
@@ -63,6 +63,11 @@ class MABacktestConfig:
     # 成本与输出
     fee_bps: float = 0.0  # 手续费（单边），单位: bp（基点）。例如 2 表示 0.02%
     slip_bps: float = 0.0  # 滑点/点差成本，单位: bp（基点），按换手额收取
+    # —— 实盘一致的开仓规模参数（用于 PositionManager 等权/名义上限）——
+    base_equity_usd: float = 10000.0
+    single_order_max_pct_equity: float = 0.4
+    max_position_usd: float = 6000.0
+    risk_percent: float = 0.02
     # ===== 合约交易相关参数 =====
     leverage: float = 50              # 杠杆倍数（仅做多方向），>=1
     funding_bps_8h: float = 0.0        # 资金费率：每8小时的bp，可为负表示收取资金费
@@ -87,7 +92,12 @@ class MABacktestConfig:
     aroon_buy: float = 70.0
     aroon_sell: float = 30.0
     confirm_min: int = 3
+    cooldown_sec: float = 0.0
     sell_cooldown_sec: float = 0.0
+    pyramid_on_buy: bool = True
+    pyramid_need_consecutive: bool = True
+    # 新增：是否允许做空（默认关闭，以保持与历史结果一致）
+    allow_short: bool = False
 
 
 class MABreakoutBacktester:
@@ -384,10 +394,13 @@ class MABreakoutBacktester:
         )
         # 新增：与实盘对齐的卖出冷却与同bar去重状态
         sell_cooldown_sec = float(getattr(self.cfg, "sell_cooldown_sec", 0.0) or 0.0)
+        cooldown_sec = float(getattr(self.cfg, "cooldown_sec", 0.0) or 0.0)
         last_sell_epoch = None  # 上次卖出发生时间（秒）
+        last_signal_epoch = None  # 上次任何买/卖信号发生时间（秒）
         last_exit_bar_ts = None  # 上次全平发生的bar时间戳
         last_partial_exit_reason_ts: dict = {}  # 各原因的上次部分平时间戳（bar级）
         trade_logs = []  # 统一交易日志输出（ts, inst, side, price, sizeFrac, reason）
+        consec_buy_bars = 0  # 连续BUY计数（bar级）
 
         for i, t in enumerate(idx):
             c1 = float(close.iloc[i]) if pd.notna(close.iloc[i]) else None
@@ -412,26 +425,29 @@ class MABreakoutBacktester:
             sell_reason = None
             buy_reason = None
 
-            if i >= (min_need - 1) and c1 is not None:
-                # 多指标确认
+            if i >= (min_need - 1) and c0 is not None:
+                # 多指标确认（上一根已收盘K线）
                 macd_cross_up = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 <= sig0) and (macd1 > sig1))
                 macd_cross_dn = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 >= sig0) and (macd1 < sig1))
-                macd_bull_ok = (macd_cross_up or (macd1 is not None and sig1 is not None and macd1 > sig1 and macd1 > 0))
-                macd_bear_ok = (macd_cross_dn or (macd1 is not None and sig1 is not None and macd1 < sig1 and macd1 < 0))
-                bb_bull_ok = (not np.isnan(bb_up1)) and (c1 > bb_up1)
-                bb_bear_ok = (not np.isnan(bb_low1)) and (c1 < bb_low1)
-                rsi_bull_ok = (rsi1 is not None) and (rsi1 >= float(self.cfg.rsi_buy))
-                rsi_bear_ok = (rsi1 is not None) and (rsi1 <= float(self.cfg.rsi_sell))
+                macd_bull_ok = (macd_cross_up or (macd0 is not None and sig0 is not None and macd0 > sig0 and macd0 > 0))
+                macd_bear_ok = (macd_cross_dn or (macd0 is not None and sig0 is not None and macd0 < sig0 and macd0 < 0))
+                bb_up0 = float(bb_upper.iloc[i-1]) if i > 0 and pd.notna(bb_upper.iloc[i-1]) else np.nan
+                bb_low0 = float(bb_lower.iloc[i-1]) if i > 0 and pd.notna(bb_lower.iloc[i-1]) else np.nan
+                bb_bull_ok = (not np.isnan(bb_up0)) and (c0 is not None) and (c0 > bb_up0)
+                bb_bear_ok = (not np.isnan(bb_low0)) and (c0 is not None) and (c0 < bb_low0)
+                rsi0 = float(rsi.iloc[i-1]) if i > 0 and pd.notna(rsi.iloc[i-1]) else None
+                rsi_bull_ok = (rsi0 is not None) and (rsi0 >= float(self.cfg.rsi_buy))
+                rsi_bear_ok = (rsi0 is not None) and (rsi0 <= float(self.cfg.rsi_sell))
                 bear_thresh = max(float(self.cfg.aroon_buy), 100.0 - float(self.cfg.aroon_sell))
-                aroon_bull_ok = (a_up1 is not None and a_dn1 is not None) and (a_up1 >= float(self.cfg.aroon_buy)) and (a_up1 > a_dn1)
-                aroon_bear_ok = (a_up1 is not None and a_dn1 is not None) and (a_dn1 >= bear_thresh) and (a_dn1 > a_up1)
+                aroon_bull_ok = (a_up0 is not None and a_dn0 is not None) and (a_up0 >= float(self.cfg.aroon_buy)) and (a_up0 > a_dn0)
+                aroon_bear_ok = (a_up0 is not None and a_dn0 is not None) and (a_dn0 >= bear_thresh) and (a_dn0 > a_up0)
                 buy_confirms = int(macd_bull_ok) + int(bb_bull_ok) + int(rsi_bull_ok) + int(aroon_bull_ok)
                 sell_confirms = int(macd_bear_ok) + int(bb_bear_ok) + int(rsi_bear_ok) + int(aroon_bear_ok)
                 need = int(max(1, min(4, int(self.cfg.confirm_min))))
                 if buy_confirms >= need and buy_confirms > sell_confirms:
-                    out_sig = "BUY"; buy_reason = "entry_multi_indicator"
+                    out_sig = "BUY"; buy_reason = "multi_indicator"
                 elif sell_confirms >= need and sell_confirms > buy_confirms:
-                    out_sig = "SELL"; sell_reason = "indicator_exit_full"; size_frac_suggest = float(_remain_frac or 1.0)
+                    out_sig = "SELL"; sell_reason = "multi_indicator"; size_frac_suggest = float(_remain_frac or 1.0)
 
                 # 止盈（仅多头）
                 tp_triggered = False
@@ -446,24 +462,50 @@ class MABreakoutBacktester:
                     if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
                         aroon_rev = (a_up0 >= a_dn0) and (a_dn1 > a_up1)
                     if aroon_rev and (_remain_frac is None or _remain_frac > 0):
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_aroon_reversal"
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_aroon_rev"
                     # 移动止损
                     if (not tp_triggered) and _trail_stop is not None and c1 <= float(_trail_stop):
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_trailing"
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered = True; sell_reason = "takeprofit_trail"
                     # R 倍数分批止盈
                     if (not tp_triggered) and _init_risk is not None and _init_risk > 0:
                         r_mult = (c1 - float(_entry_price)) / float(_init_risk)
                         if (not _tp2_done) and r_mult >= 2.0 and (_remain_frac or 0.0) > 0:
-                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp2_done = True; sell_reason = "takeprofit_r_multiple_2.0"
+                            out_sig = "SELL"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.3); tp_triggered = True; _tp2_done = True; sell_reason = "takeprofit_r2"
                         elif (not _tp1_done) and r_mult >= 1.0 and (_remain_frac or 0.0) > 0:
-                            out_sig = "SELL"; size_frac_suggest = float(min(0.3, float(_remain_frac or 1.0))); tp_triggered = True; _tp1_done = True; sell_reason = "takeprofit_r_multiple_1.0"
+                            out_sig = "SELL"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.3); tp_triggered = True; _tp1_done = True; sell_reason = "takeprofit_r1"
                     # RSI 技术止盈（部分）
                     if (not tp_triggered) and rsi1 is not None and (rsi1 >= 80.0 or rsi1 <= 20.0):
-                        out_sig = "SELL"; size_frac_suggest = float(min(0.2, float(_remain_frac or 1.0))); sell_reason = "takeprofit_rsi_partial"
+                        out_sig = "SELL"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.2); sell_reason = "takeprofit_rsi"
 
-                # 回滚：移除空头止盈止损逻辑（仅做多）
-                if _pos < 0:
-                    pass
+                # 新增：空头止盈/移动止损/分批止盈（与多头对称）
+                if _pos < 0 and _entry_price is not None:
+                    tp_triggered_short = False
+                    # 记录入场后最低价（用于空头移动止损）
+                    if low1 is not None:
+                        _entry_low = low1 if _entry_low is None else min(_entry_low, low1)
+                    # 空头移动止损：trail 只降不升（位于价格上方）
+                    if atr1 is not None and atr1 > 0 and _entry_low is not None:
+                        trail_cand_s = float(_entry_low) + 1.5 * float(atr1)
+                        _trail_stop = trail_cand_s if _trail_stop is None else min(_trail_stop, trail_cand_s)
+                    # Aroon 反转：空头平仓（BUY）
+                    aroon_rev_s = False
+                    if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
+                        aroon_rev_s = (a_dn0 >= a_up0) and (a_up1 > a_dn1)
+                    if aroon_rev_s and (_remain_frac is None or _remain_frac > 0):
+                        out_sig = "BUY"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered_short = True; buy_reason = "takeprofit_short_aroon_rev"
+                    # 移动止损触发（空头）：价格上穿 trail_stop 则平仓
+                    if (not tp_triggered_short) and _trail_stop is not None and c1 >= float(_trail_stop):
+                        out_sig = "BUY"; size_frac_suggest = float(_remain_frac or 1.0); tp_triggered_short = True; buy_reason = "takeprofit_short_trail"
+                    # R 倍数分批止盈（空头）：(entry - price) / R
+                    if (not tp_triggered_short) and _init_risk is not None and _init_risk > 0:
+                        r_mult_s = (float(_entry_price) - c1) / float(_init_risk)
+                        if (not _tp2_done) and r_mult_s >= 2.0 and (_remain_frac or 0.0) > 0:
+                            out_sig = "BUY"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.3); tp_triggered_short = True; _tp2_done = True; buy_reason = "takeprofit_short_r2"
+                        elif (not _tp1_done) and r_mult_s >= 1.0 and (_remain_frac or 0.0) > 0:
+                            out_sig = "BUY"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.3); tp_triggered_short = True; _tp1_done = True; buy_reason = "takeprofit_short_r1"
+                    # RSI 技术止盈（空头部分）：极值时建议部分平仓
+                    if (not tp_triggered_short) and rsi1 is not None and (rsi1 >= 80.0 or rsi1 <= 20.0):
+                        out_sig = "BUY"; size_frac_suggest = float(float(_remain_frac or 1.0) * 0.2); buy_reason = "takeprofit_short_rsi"
 
                 # 止损（若未触发止盈）
                 if _pos > 0 and _entry_price is not None and (size_frac_suggest is None or size_frac_suggest >= 0.999):
@@ -472,7 +514,7 @@ class MABreakoutBacktester:
                     if atr1 is not None and atr1 > 0:
                         atr_stop = float(_entry_price) - 2.0 * float(atr1)
                         if c1 <= atr_stop:
-                            stop_hit = True
+                            stop_hit = "atr"
                     # 百分比止损（按BTC/ETH不同）
                     if stop_hit is None:
                         sym = str(self.cfg.inst).upper()
@@ -481,14 +523,39 @@ class MABreakoutBacktester:
                         if stop_pct is not None and stop_pct > 0:
                             pct_stop = float(_entry_price) * (1.0 - float(stop_pct))
                             if c1 <= pct_stop:
-                                stop_hit = True
+                                stop_hit = "pct"
                     # 技术指标止损
                     if stop_hit is None:
                         macd_cross_dn2 = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 >= sig0) and (macd1 < sig1))
                         if (not np.isnan(bb_low1) and c1 < bb_low1) or macd_cross_dn2:
-                            stop_hit = True
-                    if stop_hit:
-                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); sell_reason = "stoploss_full"
+                            stop_hit = "tech"
+                    if stop_hit is not None:
+                        out_sig = "SELL"; size_frac_suggest = float(_remain_frac or 1.0); sell_reason = f"stoploss_{stop_hit}"
+
+                # 止损（若未触发止盈）- 空头对称
+                if _pos < 0 and _entry_price is not None and (size_frac_suggest is None or size_frac_suggest >= 0.999):
+                    stop_hit_s = None
+                    # ATR 止损（空头）：入场价 + 2ATR
+                    if atr1 is not None and atr1 > 0:
+                        atr_stop_s = float(_entry_price) + 2.0 * float(atr1)
+                        if c1 >= atr_stop_s:
+                            stop_hit_s = "atr"
+                    # 百分比止损（空头）：入场价 * (1 + pct)
+                    if stop_hit_s is None:
+                        sym = str(self.cfg.inst).upper()
+                        pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                        stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                        if stop_pct is not None and stop_pct > 0:
+                            pct_stop_s = float(_entry_price) * (1.0 + float(stop_pct))
+                            if c1 >= pct_stop_s:
+                                stop_hit_s = "pct"
+                    # 技术指标止损（空头）：上穿上轨或 MACD 上穿
+                    if stop_hit_s is None:
+                        macd_cross_up2 = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 <= sig0) and (macd1 > sig1))
+                        if (not np.isnan(bb_up1) and c1 > bb_up1) or macd_cross_up2:
+                            stop_hit_s = "tech"
+                    if stop_hit_s is not None:
+                        out_sig = "BUY"; size_frac_suggest = float(_remain_frac or 1.0); buy_reason = f"stoploss_short_{stop_hit_s}"
 
                 # 与实盘一致的卖出冷却与同bar去重（在状态更新前判定）
                 if out_sig == "SELL":
@@ -509,39 +576,140 @@ class MABreakoutBacktester:
                             if last_exit_bar_ts == t:
                                 out_sig = "HOLD"; size_frac_suggest = None; sell_reason = None
 
+                # 新增：通用冷却（BUY/SELL 节流），与实盘一致
+                if out_sig in ("BUY", "SELL"):
+                    try:
+                        ts_epoch = t.to_pydatetime().timestamp()
+                    except Exception:
+                        ts_epoch = pd.Timestamp(t).timestamp()
+                    if cooldown_sec > 0.0 and (last_signal_epoch is not None) and ((ts_epoch - float(last_signal_epoch)) < float(cooldown_sec)):
+                        out_sig = "HOLD"; size_frac_suggest = None; sell_reason = None; buy_reason = None
+
+                # 记录连续BUY计数（与实盘加仓逻辑对齐）
+                if out_sig == "BUY":
+                    consec_buy_bars += 1
+                else:
+                    consec_buy_bars = 0
+
                 # 状态更新（支持部分止盈）
                 pre_pos = _pos
                 sell_size_to_log = None
                 if out_sig == "SELL" and pre_pos == 1:
                     sell_size_to_log = float(size_frac_suggest) if size_frac_suggest is not None else float(_remain_frac or 1.0)
+                buy_size_to_log = None
+                if out_sig == "BUY" and pre_pos == -1:
+                    buy_size_to_log = float(size_frac_suggest) if size_frac_suggest is not None else float(_remain_frac or 1.0)
                 if out_sig == "BUY" and _pos == 0:
-                     _pos = 1
-                     _entry_price = c1
-                     _entry_high = high1
-                     _entry_low = None
-                     _tp1_done = False
-                     _tp2_done = False
-                     _remain_frac = 1.0
-                     _trail_stop = None
-                     # 入场时估算初始风险 R
-                     eff_stop = None
+                     # —— 与实盘一致：按权益与风险等权计算开仓比例（初始保证金占比）——
+                     eq_usd = float(self.cfg.base_equity_usd) * float(equity)
+                     max_by_pct = float(eq_usd) * float(self.cfg.single_order_max_pct_equity)
+                     max_by_pos = float(self.cfg.max_position_usd)
+                     notional_cap = max(0.0, min(max_by_pct, max_by_pos))
+                     default_frac = (notional_cap / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else 0.0
+                     risk_frac = None
+                     # 推导用于风险等权的止损价（优先 ATR，其次百分比）
+                     eff_for_size = None
                      if atr1 is not None and atr1 > 0:
-                         eff_stop = max(eff_stop or -1e18, float(_entry_price) - 2.0 * float(atr1))
+                         eff_for_size = max(eff_for_size or -1e18, float(c1) - 2.0 * float(atr1))
                      sym = str(self.cfg.inst).upper()
                      pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
-                     stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
-                     if stop_pct is not None and stop_pct > 0:
-                         eff_stop = max(eff_stop or -1e18, float(_entry_price) * (1.0 - float(stop_pct)))
-                     _init_risk = (float(_entry_price) - eff_stop) if (eff_stop is not None and eff_stop < float(_entry_price)) else float(_entry_price) * 0.01
-                     # 记录BUY交易日志
-                     trade_logs.append({
-                        "ts": t.isoformat(),
-                        "inst": self.cfg.inst,
-                        "side": "BUY",
-                        "price": float(c1) if c1 is not None else np.nan,
-                        "sizeFrac": 1.0,
-                        "reason": buy_reason or "entry_multi_indicator"
-                    })
+                     stop_pct_cfg = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                     if stop_pct_cfg is not None and stop_pct_cfg > 0:
+                         eff_for_size = max(eff_for_size or -1e18, float(c1) * (1.0 - float(stop_pct_cfg)))
+                     if float(self.cfg.risk_percent) > 0 and eff_for_size is not None and float(eff_for_size) > 0 and float(eff_for_size) < float(c1):
+                         per_unit_risk = float(c1) - float(eff_for_size)
+                         risk_usd = float(eq_usd) * float(self.cfg.risk_percent)
+                         if per_unit_risk > 0 and risk_usd > 0:
+                             risk_size_qty = risk_usd / per_unit_risk
+                             risk_notional = risk_size_qty * float(c1)
+                             risk_frac = (risk_notional / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else None
+                     entry_frac = float(default_frac)
+                     if risk_frac is not None and risk_frac > 0:
+                         entry_frac = min(entry_frac, float(risk_frac))
+                     entry_frac = float(max(0.0, min(1.0, entry_frac)))
+                     if entry_frac <= 1e-12:
+                         # 无法有效开仓则跳过本次 BUY
+                         out_sig = "HOLD"; buy_reason = None
+                     else:
+                         _pos = 1
+                         _entry_price = c1
+                         _entry_high = high1
+                         _entry_low = None
+                         _tp1_done = False
+                         _tp2_done = False
+                         _remain_frac = float(entry_frac)
+                         _trail_stop = None
+                         # 入场时估算初始风险 R
+                         eff_stop = None
+                         if atr1 is not None and atr1 > 0:
+                             eff_stop = max(eff_stop or -1e18, float(_entry_price) - 2.0 * float(atr1))
+                         sym = str(self.cfg.inst).upper()
+                         pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                         stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                         if stop_pct is not None and stop_pct > 0:
+                             eff_stop = max(eff_stop or -1e18, float(_entry_price) * (1.0 - float(stop_pct)))
+                         _init_risk = (float(_entry_price) - eff_stop) if (eff_stop is not None and eff_stop < float(_entry_price)) else float(_entry_price) * 0.01
+                         # 记录BUY交易日志（sizeFrac=实际开仓比例）
+                         trade_logs.append({
+                            "ts": t.isoformat(),
+                            "inst": self.cfg.inst,
+                            "side": "BUY",
+                            "price": float(c1) if c1 is not None else np.nan,
+                            "sizeFrac": float(entry_frac),
+                            "reason": buy_reason or "entry_multi_indicator"
+                         })
+                         try:
+                             ts_epoch = t.to_pydatetime().timestamp()
+                         except Exception:
+                             ts_epoch = pd.Timestamp(t).timestamp()
+                         last_signal_epoch = ts_epoch
+                elif out_sig == "BUY" and _pos == 1 and bool(getattr(self.cfg, "pyramid_on_buy", False)):
+                    # —— 与实盘一致：持有多头且再次出现BUY时加仓（遵守单笔上限与总仓位上限）——
+                    need_consec = bool(getattr(self.cfg, "pyramid_need_consecutive", True))
+                    if (not need_consec) or (consec_buy_bars >= 2):
+                        eq_usd = float(self.cfg.base_equity_usd) * float(equity)
+                        already_notional = float(eq_usd) * float(L) * float(_remain_frac or 0.0)
+                        total_cap = float(self.cfg.max_position_usd)
+                        remain_cap = max(0.0, total_cap - already_notional)
+                        per_order_cap = min(float(eq_usd) * float(self.cfg.single_order_max_pct_equity), total_cap)
+                        notional_cap = min(per_order_cap, remain_cap)
+                        default_frac = (notional_cap / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else 0.0
+                        risk_frac = None
+                        # 推导用于风险等权的止损价（优先 ATR，其次百分比）
+                        eff_for_size = None
+                        if atr1 is not None and atr1 > 0:
+                            eff_for_size = max(eff_for_size or -1e18, float(c1) - 2.0 * float(atr1))
+                        sym = str(self.cfg.inst).upper()
+                        pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                        stop_pct_cfg = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                        if stop_pct_cfg is not None and stop_pct_cfg > 0:
+                            eff_for_size = max(eff_for_size or -1e18, float(c1) * (1.0 - float(stop_pct_cfg)))
+                        if float(self.cfg.risk_percent) > 0 and eff_for_size is not None and float(eff_for_size) > 0 and float(eff_for_size) < float(c1):
+                            per_unit_risk = float(c1) - float(eff_for_size)
+                            risk_usd = float(eq_usd) * float(self.cfg.risk_percent)
+                            if per_unit_risk > 0 and risk_usd > 0:
+                                risk_size_qty = risk_usd / per_unit_risk
+                                risk_notional = risk_size_qty * float(c1)
+                                risk_frac = (risk_notional / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else None
+                        add_frac = float(default_frac)
+                        if risk_frac is not None and risk_frac > 0:
+                            add_frac = min(add_frac, float(risk_frac))
+                        add_frac = float(max(0.0, min(1.0, add_frac)))
+                        if add_frac > 1e-12:
+                            _remain_frac = float(_remain_frac or 0.0) + float(add_frac)
+                            trade_logs.append({
+                                "ts": t.isoformat(),
+                                "inst": self.cfg.inst,
+                                "side": "BUY",
+                                "price": float(c1) if c1 is not None else np.nan,
+                                "sizeFrac": float(add_frac),
+                                "reason": "add_on_consecutive_buy" if need_consec else "add_on_buy"
+                            })
+                            try:
+                                ts_epoch = t.to_pydatetime().timestamp()
+                            except Exception:
+                                ts_epoch = pd.Timestamp(t).timestamp()
+                            last_signal_epoch = ts_epoch
                 elif out_sig == "SELL" and _pos == 1:
                      if size_frac_suggest is not None and size_frac_suggest < 0.999:
                          _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
@@ -555,6 +723,7 @@ class MABreakoutBacktester:
                      except Exception:
                          ts_epoch = pd.Timestamp(t).timestamp()
                      last_sell_epoch = ts_epoch
+                     last_signal_epoch = ts_epoch
                      if size_frac_suggest is not None and size_frac_suggest < 0.999:
                          if sell_reason:
                              last_partial_exit_reason_ts[sell_reason] = t
@@ -569,8 +738,109 @@ class MABreakoutBacktester:
                          "reason": sell_reason or "unknown"
                      })
                 elif out_sig == "SELL" and _pos == 0:
-                     # 回滚：空仓不再开空（仅做多）
-                     pass
+                    if bool(getattr(self.cfg, "allow_short", False)):
+                        # —— 做空入场过滤：仅在空头环境开空（降低震荡试错） ——
+                        bb_mid0 = float(bb_mid.iloc[i-1]) if i > 0 and pd.notna(bb_mid.iloc[i-1]) else np.nan
+                        macd_bear_ok2 = (macd0 is not None and sig0 is not None and macd1 is not None and sig1 is not None and (macd0 >= sig0) and (macd1 < sig1)) or (macd0 is not None and sig0 is not None and macd0 < sig0 and macd0 < 0)
+                        rsi_bear_ok2 = (rsi0 is not None) and (rsi0 <= float(self.cfg.rsi_sell))
+                        bear_thresh2 = max(float(self.cfg.aroon_buy), 100.0 - float(self.cfg.aroon_sell))
+                        aroon_bear_ok2 = (a_up0 is not None and a_dn0 is not None) and (a_dn0 >= bear_thresh2) and (a_dn0 > a_up0)
+                        sell_confirms2 = int(macd_bear_ok2) + int((not np.isnan(bb_low0) and c0 is not None and c0 < bb_low0)) + int(rsi_bear_ok2) + int(aroon_bear_ok2)
+                        need_short = int(max(1, min(4, int(self.cfg.confirm_min) + 1)))
+                        short_env_ok = (not np.isnan(bb_mid0)) and (c0 is not None) and (c0 < bb_mid0)
+                        if not (short_env_ok and sell_confirms2 >= need_short and sell_confirms2 > 0):
+                            # 环境或确认不足：不在此bar开空
+                            out_sig = "HOLD"; sell_reason = None
+                        else:
+                            # —— 对称：按权益与风险等权计算空头开仓比例 ——
+                            eq_usd = float(self.cfg.base_equity_usd) * float(equity)
+                            max_by_pct = float(eq_usd) * float(self.cfg.single_order_max_pct_equity)
+                            max_by_pos = float(self.cfg.max_position_usd)
+                            notional_cap = max(0.0, min(max_by_pct, max_by_pos))
+                            default_frac = (notional_cap / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else 0.0
+                            risk_frac = None
+                            # 推导风险等权的止损价（空头）：优先 ATR，其次百分比
+                            eff_for_size = None
+                            if atr1 is not None and atr1 > 0:
+                                eff_for_size = min(eff_for_size or 1e18, float(c1) + 2.0 * float(atr1))
+                            sym = str(self.cfg.inst).upper()
+                            pct_default = 0.03 if sym.startswith("BTC") else (0.04 if sym.startswith("ETH") else None)
+                            stop_pct_cfg = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                            if stop_pct_cfg is not None and stop_pct_cfg > 0:
+                                eff_for_size = min(eff_for_size or 1e18, float(c1) * (1.0 + float(stop_pct_cfg)))
+                            if float(self.cfg.risk_percent) > 0 and eff_for_size is not None and float(eff_for_size) > float(c1):
+                                per_unit_risk = float(eff_for_size) - float(c1)
+                                # 空头风险缩放：默认将风险预算下调为多头的 0.7
+                                risk_usd = float(eq_usd) * float(self.cfg.risk_percent) * 0.7
+                                if per_unit_risk > 0 and risk_usd > 0:
+                                    risk_size_qty = risk_usd / per_unit_risk
+                                    risk_notional = risk_size_qty * float(c1)
+                                    risk_frac = (risk_notional / (eq_usd * float(L))) if (eq_usd > 0 and float(L) > 0) else None
+                            entry_frac_s = float(default_frac)
+                            if risk_frac is not None and risk_frac > 0:
+                                entry_frac_s = min(entry_frac_s, float(risk_frac))
+                            entry_frac_s = float(max(0.0, min(1.0, entry_frac_s)))
+                            if entry_frac_s <= 1e-12:
+                                # 无法有效开空则跳过本次 SELL
+                                out_sig = "HOLD"; sell_reason = None
+                            else:
+                                _pos = -1
+                                _entry_price = c1
+                                _entry_low = low1
+                                _entry_high = None
+                                _tp1_done = False
+                                _tp2_done = False
+                                _remain_frac = float(entry_frac_s)
+                                _trail_stop = None
+                                # 估算初始风险 R（空头）
+                                eff_stop_s = None
+                                if atr1 is not None and atr1 > 0:
+                                    eff_stop_s = min(eff_stop_s or 1e18, float(_entry_price) + 2.0 * float(atr1))
+                                stop_pct = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default
+                                if stop_pct is not None and stop_pct > 0:
+                                    eff_stop_s = min(eff_stop_s or 1e18, float(_entry_price) * (1.0 + float(stop_pct)))
+                                _init_risk = (eff_stop_s - float(_entry_price)) if (eff_stop_s is not None and eff_stop_s > float(_entry_price)) else float(_entry_price) * 0.01
+                                # 记录 SELL 开空交易日志
+                                trade_logs.append({
+                                    "ts": t.isoformat(),
+                                    "inst": self.cfg.inst,
+                                    "side": "SELL",
+                                    "price": float(c1) if c1 is not None else np.nan,
+                                    "sizeFrac": float(entry_frac_s),
+                                    "reason": sell_reason or "entry_short_multi_indicator"
+                                })
+                                try:
+                                    ts_epoch = t.to_pydatetime().timestamp()
+                                except Exception:
+                                    ts_epoch = pd.Timestamp(t).timestamp()
+                                last_sell_epoch = ts_epoch
+                                last_signal_epoch = ts_epoch
+                    else:
+                        # 未开启做空：维持空仓不动
+                        pass
+
+                elif out_sig == "BUY" and _pos == -1:
+                    # 空头平仓（BUY）：支持部分/全量
+                    if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                        _remain_frac = max(0.0, float(_remain_frac or 0.0) - float(size_frac_suggest))
+                        if _remain_frac <= 1e-6:
+                            _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                    else:
+                        _pos = 0; _entry_price = None; _entry_high = None; _entry_low = None; _trail_stop = None; _init_risk = None; _tp1_done = False; _tp2_done = False
+                    try:
+                        ts_epoch = t.to_pydatetime().timestamp()
+                    except Exception:
+                        ts_epoch = pd.Timestamp(t).timestamp()
+                    # BUY 平空：仅更新通用信号冷却（不使用卖出冷却）
+                    last_signal_epoch = ts_epoch
+                    trade_logs.append({
+                        "ts": t.isoformat(),
+                        "inst": self.cfg.inst,
+                        "side": "BUY",
+                        "price": float(c1) if c1 is not None else np.nan,
+                        "sizeFrac": float(buy_size_to_log) if buy_size_to_log is not None else float(_remain_frac or 0.0),
+                        "reason": buy_reason or "unknown"
+                    })
 
             # 当根结束：计算净值变化（上一根仓位 * 本根涨跌 - 换手手续费）
             cur_pos_frac = (float(_remain_frac) if _pos == 1 else (-float(_remain_frac) if _pos == -1 else 0.0))  # 改为带符号的持仓比例
@@ -769,8 +1039,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--buffer", type=float, default=0.0, help="兼容旧参数：突破缓冲比例（不再使用）")
     p.add_argument("--fee_bps", type=float, default=0.0, help="手续费（单边），基点，例如 2=0.02%%")
     p.add_argument("--slip_bps", type=float, default=0.0, help="滑点/点差成本，基点，例如 2=0.02%%")
+    # —— 实盘一致的开仓规模参数 ——
+    p.add_argument("--base_equity_usd", type=float, default=10000.0, help="基准权益（USD），用于计算开仓名义上限与风险资金")
+    p.add_argument("--single_order_max_pct_equity", type=float, default=0.2, help="单次下单最大权益占比（0-1）")
+    p.add_argument("--max_position_usd", type=float, default=2000.0, help="单标的最大持仓名义金额（USD）")
+    p.add_argument("--risk_percent", type=float, default=0.01, help="风险等权开仓占权益百分比（BUY/SELL 均适用）")
     # ===== 合约交易相关参数 =====
-    p.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数（仅做多方向），>=1")
+    p.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数（正反向均乘），>=1")
     p.add_argument("--funding_bps_8h", type=float, default=0.0, help="资金费率：每8小时的bp，可为负表示收取资金费")
     p.add_argument("--mmr_bps", type=float, default=50.0, help="维持保证金率（bp），默认0.50%")
     p.add_argument("--liq_penalty_bps", type=float, default=10.0, help="强平附加惩罚（bp）")
@@ -778,6 +1053,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--sl_pct", type=float, default=None, help="可选：止损百分比（不在回测中强制执行，仅记录）")
     p.add_argument("--plot", type=int, default=1, help="是否导出SVG图：1是 0否")
     p.add_argument("--sell_cooldown_sec", type=float, default=0.0, help="卖出冷却秒数（与实盘保持一致）")
+    p.add_argument("--cooldown_sec", type=float, default=0.0, help="通用冷却秒数（BUY/SELL/HOLD 节流，与实盘一致）")
+    p.add_argument("--pyramid_on_buy", type=int, default=1, help="BUY时（持有多头）允许加仓：1是 0否")
+    p.add_argument("--pyramid_need_consecutive", type=int, default=1, help="仅在连续BUY时加仓：1是 0否")
+    p.add_argument("--allow_short", type=int, default=0, help="允许做空：1是 0否")
     # 新策略参数（若提供则覆盖旧参数所映射的默认值）
     p.add_argument("--macd_fast", type=int, default=None, help="MACD EMA 快线窗口")
     p.add_argument("--macd_slow", type=int, default=None, help="MACD EMA 慢线窗口")
@@ -840,6 +1119,11 @@ if __name__ == "__main__":
         buffer=float(args.buffer),
         fee_bps=float(args.fee_bps),
         slip_bps=float(args.slip_bps),
+        # —— 实盘一致的开仓规模参数 ——
+        base_equity_usd=float(args.base_equity_usd),
+        single_order_max_pct_equity=float(args.single_order_max_pct_equity),
+        max_position_usd=float(args.max_position_usd),
+        risk_percent=float(args.risk_percent),
         # ===== 合约参数传入 =====
         leverage=float(args.leverage),
         funding_bps_8h=float(args.funding_bps_8h),
@@ -863,7 +1147,11 @@ if __name__ == "__main__":
         aroon_buy=aroon_buy,
         aroon_sell=aroon_sell,
         confirm_min=confirm_min,
+        cooldown_sec=float(args.cooldown_sec),
         sell_cooldown_sec=float(args.sell_cooldown_sec),
+        pyramid_on_buy=bool(int(args.pyramid_on_buy)),
+        pyramid_need_consecutive=bool(int(args.pyramid_need_consecutive)),
+        allow_short=bool(int(args.allow_short)),
     )
     bt = MABreakoutBacktester(cfg)
     res = bt.run()

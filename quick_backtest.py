@@ -45,10 +45,33 @@ CONFIG = {
     "timeframe": "15m",
 
     # 新增：回测杠杆倍数（>=1，影响名义杠杆、资金费与换手成本的放大系数）
-    "leverage": 10,
+    "leverage": 20,
+    # 是否允许做空（0=不允许，仅做多；1=允许双向）
+    "allow_short": 0,
+
+    # ===== 仓位与风险配置（影响实盘一致性） =====
+    # 基准权益（USD）：用于计算开仓名义上限与风险资金
+    "base_equity_usd": 10000,
+    # 单次下单最大权益占比（0-1），默认更积极一些
+    "single_order_max_pct_equity": 0.6,
+    # 单标的最大持仓名义金额（USD），适度放宽上限以避免过小暴露
+    "max_position_usd": 12000,
+    # 风险等权开仓占权益百分比（仅 BUY 场景启用）
+    "risk_percent": 0.025,
+
+    # ===== 信号确认与节流 =====
+    # 最少确认数（1~4），与多指标确认一致，默认 2 较为宽松
+    "confirm_min": 2,
+    # 通用冷却秒数（BUY/SELL均节流），避免过于频繁的同向/反向触发
+    "cooldown_sec": 600,
+    # 仅针对 SELL 的额外冷却（如无需额外节流设为 0）
+    "sell_cooldown_sec": 0,
+    # BUY 时允许加仓、是否要求连续 BUY 才加仓
+    "pyramid_on_buy": 1,
+    "pyramid_need_consecutive": 0,
 
     # 起止日期（UTC）
-    "start": "2025-06-01",
+    "start": "2025-06-02",
     "end": "2025-10-21",
 
 
@@ -101,6 +124,8 @@ def parse_args():
     p.add_argument("csv", nargs="?", help="CSV 文件路径（可选，提供则直接离线回测该文件）")
     # 可选参数：与位置参数等价
     p.add_argument("--csv", dest="csv_opt", help="CSV 文件路径（等同于位置参数）")
+    # 允许做空开关（覆盖 CONFIG.allow_short）
+    p.add_argument("--allow-short", dest="allow_short", type=int, choices=[0, 1], help="允许做空：1是 0否（默认0，长仅）")
     return p.parse_args()
 
 
@@ -148,6 +173,23 @@ def main() -> int:
     # 打印配置
     print("===== Python 一键回测 =====")
     for k in ["mode", "exchange", "inst", "timeframe", "start", "end", "proxy", "data_dir", "csv_path"]:
+        print(f"{k}: {CONFIG.get(k)}")
+
+    # 补充打印关键策略参数，便于确认
+    print("\n===== 策略参数 =====")
+    for k in [
+        "leverage",
+        "allow_short",
+        "base_equity_usd",
+        "single_order_max_pct_equity",
+        "max_position_usd",
+        "risk_percent",
+        "confirm_min",
+        "cooldown_sec",
+        "sell_cooldown_sec",
+        "pyramid_on_buy",
+        "pyramid_need_consecutive",
+    ]:
         print(f"{k}: {CONFIG.get(k)}")
 
     data_dir = PROJECT_DIR / CONFIG["data_dir"]
@@ -221,6 +263,14 @@ def main() -> int:
         except Exception:
             pass
 
+    # 覆盖 allow_short（若通过命令行传入）
+    try:
+        # argparse 返回对象在 main 函数内，若不存在则忽略
+        if 'args' in locals() and getattr(args, 'allow_short', None) is not None:
+            CONFIG["allow_short"] = int(getattr(args, 'allow_short'))
+    except Exception:
+        pass
+
     # 2) 回测阶段
     print("\n===== 回测阶段 =====")
     backtest_inst = CONFIG["inst"]
@@ -235,7 +285,20 @@ def main() -> int:
         "--end", CONFIG["end"],
         "--timeframe", backtest_timeframe,
         "--leverage", str(CONFIG["leverage"]),
+        "--allow_short", str(CONFIG["allow_short"]),
         "--plot", "1",
+        # 传递仓位与风险参数（与 ma_backtest CLI 对齐）
+        "--base_equity_usd", str(CONFIG["base_equity_usd"]),
+        "--single_order_max_pct_equity", str(CONFIG["single_order_max_pct_equity"]),
+        "--max_position_usd", str(CONFIG["max_position_usd"]),
+        "--risk_percent", str(CONFIG["risk_percent"]),
+        # 传递确认与冷却参数
+        "--confirm_min", str(CONFIG["confirm_min"]),
+        "--cooldown_sec", str(CONFIG["cooldown_sec"]),
+        "--sell_cooldown_sec", str(CONFIG["sell_cooldown_sec"]),
+        # 金字塔加仓策略开关
+        "--pyramid_on_buy", str(CONFIG["pyramid_on_buy"]),
+        "--pyramid_need_consecutive", str(CONFIG["pyramid_need_consecutive"]),
     ]
 
     code = run_cmd(backtest_cmd, env=env)

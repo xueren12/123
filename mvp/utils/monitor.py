@@ -231,6 +231,9 @@ class RealTimeMonitor:
                 aroon_buy=float(os.getenv("AROON_BUY") or os.getenv("MA_AROON_BUY", "70")),
                 aroon_sell=float(os.getenv("AROON_SELL") or os.getenv("MA_AROON_SELL", "30")),
                 confirm_min=int(os.getenv("MI_CONFIRM_MIN") or os.getenv("MA_CONFIRM_MIN", "3")),
+                # 空头开仓控制
+                allow_short=((os.getenv("MI_ALLOW_SHORT") or os.getenv("MA_ALLOW_SHORT", "0")) == "1"),
+                short_confirm_extra=int(os.getenv("SHORT_CONFIRM_EXTRA") or os.getenv("MA_SHORT_CONFIRM_EXTRA", "1")),
                 # —— 新增：止损参数（可通过环境变量覆盖）——
                 atr_n=float(os.getenv("ATR_N") or os.getenv("MA_ATR_N", "2.0")),  # ATR 倍数 N
                 stop_loss_pct_btc=float(os.getenv("STOP_LOSS_PCT_BTC") or os.getenv("MA_STOP_LOSS_PCT_BTC", "0.03")),

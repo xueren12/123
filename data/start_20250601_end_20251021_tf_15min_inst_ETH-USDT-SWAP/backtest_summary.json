@@ -1,8 +1,8 @@
 {
   "metrics": {
-    "sharpe": 2.439441673931852,
-    "winrate": 0.5636363636363636,
-    "max_drawdown": 0.8964608749824248
+    "sharpe": 1.9193996958590303,
+    "winrate": 0.521414004078858,
+    "max_drawdown": 0.1335197827796598
   },
   "context": {
     "inst": "ETH-USDT-SWAP",

@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os  # 读取做空风险缩放系数
 from typing import Callable, Optional, Dict, Any
 
 from utils.config import AppConfig
@@ -62,6 +63,11 @@ class PositionManager:
             max_position_usd=float(self.cfg.risk.max_position_usd),
             risk_percent=float(getattr(self.cfg.discipline, "risk_percent", 0.0) or 0.0),
         )
+        # 做空风险缩放：允许通过环境变量调整 SELL 的风险系数（默认1.0，不缩放）
+        try:
+            self._short_risk_scale: float = float(os.getenv("SHORT_RISK_SCALE", "1.0"))
+        except Exception:
+            self._short_risk_scale = 1.0
 
     def compute_size(self, inst_id: str, side: str, price: Optional[float] = None, stop_px: Optional[float] = None) -> Optional[float]:
         """计算建议下单手数（币数量）。
@@ -115,9 +121,11 @@ class PositionManager:
 
             final_size = default_size
 
-            # —— 风险等权 sizing（仅 BUY 场景）——
+            # —— 风险等权 sizing（BUY/SELL 对称支持）——
             try:
-                if str(side).lower() == "buy" and float(self.pm_cfg.risk_percent) > 0:
+                side_l = str(side).lower()
+                rp = float(self.pm_cfg.risk_percent)
+                if side_l == "buy" and rp > 0:
                     spx = stop_px
                     if spx is None:
                         # 按标的固定止损百分比推导（优先使用 DisciplineConfig 中 BTC/ETH 百分比）
@@ -132,7 +140,28 @@ class PositionManager:
                     # 计算“单币风险”（USD）
                     if spx is not None and float(spx) > 0 and float(spx) < float(px):
                         per_unit_risk = float(px) - float(spx)
-                        risk_usd = float(equity) * float(self.pm_cfg.risk_percent)
+                        risk_usd = float(equity) * rp
+                        if per_unit_risk > 0 and risk_usd > 0:
+                            risk_size = risk_usd / per_unit_risk
+                            if risk_size > 0:
+                                final_size = min(final_size, risk_size)
+                elif side_l == "sell" and rp > 0:
+                    spx = stop_px
+                    if spx is None:
+                        # 做空：固定百分比止损推导，spx = price * (1 + pct)
+                        sym = str(inst_id).upper()
+                        pct = None
+                        if sym.startswith("BTC"):
+                            pct = float(getattr(self.cfg.discipline, "stop_loss_pct_btc", 0.0) or 0.0)
+                        elif sym.startswith("ETH"):
+                            pct = float(getattr(self.cfg.discipline, "stop_loss_pct_eth", 0.0) or 0.0)
+                        if pct is not None and pct > 0:
+                            spx = float(px) * (1.0 + float(pct))
+                    # 空头“单币风险”（USD）= spx - price（止损在上方）
+                    if spx is not None and float(spx) > float(px):
+                        per_unit_risk = float(spx) - float(px)
+                        # 允许做空风险缩放（更保守或更激进）
+                        risk_usd = float(equity) * rp * float(self._short_risk_scale or 1.0)
                         if per_unit_risk > 0 and risk_usd > 0:
                             risk_size = risk_usd / per_unit_risk
                             if risk_size > 0:

@@ -371,6 +371,9 @@ class SystemOrchestrator:
                 aroon_period=int(os.getenv("AROON_PERIOD", "14")),
                 # 新增：显式设置策略 timeframe，确保与预填口径一致
                 timeframe=(os.getenv("MI_TIMEFRAME") or os.getenv("MA_TIMEFRAME", "5min")),
+                # 新增：空头开仓控制
+                allow_short=((os.getenv("MI_ALLOW_SHORT") or os.getenv("MA_ALLOW_SHORT", "0")) == "1"),
+                short_confirm_extra=int(os.getenv("SHORT_CONFIRM_EXTRA") or os.getenv("MA_SHORT_CONFIRM_EXTRA", "1")),
                 # —— 风控参数：使用前面计算好的值 ——
                 atr_n=atr_n_val,
                 stop_loss_pct_btc=sl_btc_val,
@@ -540,10 +543,70 @@ class SystemOrchestrator:
                             except Exception:
                                 sell_close_reason = (size_frac is not None)
                             if side == "SELL":
+                                # 判断是否允许做空开仓
+                                allow_short = bool(getattr(strat.cfg, "allow_short", False))
                                 if virt_pos <= 1e-8 and not sell_close_reason:
-                                    logger.info("[跳过下单] {} 长仅模式：空仓 SELL 不开空", inst)
-                                    continue
-                                ts_side = "close"
+                                    if allow_short:
+                                        # —— 空仓 SELL：作为开空处理 ——
+                                        ts_side = "sell"
+                                        # 合约/永续设置 posSide=short（通过 extra 透传）
+                                        try:
+                                            meta.setdefault("extra", {})
+                                            parts = inst.split("-")
+                                            is_derivative2 = (len(parts) >= 3) or inst.endswith("-SWAP")
+                                        except Exception:
+                                            is_derivative2 = False
+                                        if is_derivative2:
+                                            try:
+                                                meta["extra"].setdefault("posSide", "short")
+                                            except Exception:
+                                                pass
+                                        # 计算做空止损价（用于风险等权 sizing 与止损透传）：按学科配置的百分比
+                                        short_stop = None
+                                        try:
+                                            px_now = None
+                                            try:
+                                                px_now = float(sig.get("close")) if sig.get("close") is not None else None
+                                            except Exception:
+                                                px_now = None
+                                            if px_now is None:
+                                                try:
+                                                    px_now = float(self.executor.get_last_price(inst))
+                                                except Exception:
+                                                    px_now = None
+                                            if px_now is not None and px_now > 0:
+                                                symu = str(inst).upper()
+                                                pct = None
+                                                try:
+                                                    if symu.startswith("BTC"):
+                                                        pct = float(getattr(self.cfg.discipline, "stop_loss_pct_btc", 0.0) or 0.0)
+                                                    elif symu.startswith("ETH"):
+                                                        pct = float(getattr(self.cfg.discipline, "stop_loss_pct_eth", 0.0) or 0.0)
+                                                except Exception:
+                                                    pct = None
+                                                if pct is not None and pct > 0:
+                                                    short_stop = float(px_now) * (1.0 + float(pct))
+                                        except Exception:
+                                            short_stop = None
+                                        # 风险等权：若可计算止损，尝试据此重算手数
+                                        try:
+                                            if self.pos_manager is not None:
+                                                pm_short = self.pos_manager.compute_size(inst, "sell", stop_px=short_stop)
+                                                if pm_short is not None and pm_short > 0:
+                                                    used_size = pm_short
+                                        except Exception:
+                                            pass
+                                        # 透传止损参数（若未禁用）
+                                        if (not disable_sl) and (short_stop is not None):
+                                            try:
+                                                meta["slTriggerPx"] = float(short_stop)
+                                            except Exception:
+                                                pass
+                                    else:
+                                        logger.info("[跳过下单] {} 长仅模式：空仓 SELL 不开空", inst)
+                                        continue
+                                else:
+                                    ts_side = "close"
                             else:
                                 ts_side = side.lower()
 

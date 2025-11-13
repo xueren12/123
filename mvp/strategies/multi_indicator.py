@@ -67,6 +67,9 @@ class MABreakoutConfig:
     aroon_sell: float = 30.0               # Aroon 空头阈值（Down），与 Up 配合用于判断领先关系
 
     confirm_min: int = 3                   # 至少满足的确认数（1~4）
+    # —— 空头开仓控制 ——
+    allow_short: bool = False              # 是否允许做空开仓（默认关闭）
+    short_confirm_extra: int = 1           # 空头确认加严：在 confirm_min 基础上额外增加的确认数
 
     # —— 新增：止损参数 ——
     atr_n: float = 2.0                     # ATR 止损倍数 N（止损阈值 = 入场价 - N * ATR），ATR 周期固定为 14
@@ -90,7 +93,7 @@ class MABreakoutStrategy:
         self.cfg = cfg
         self.db = TimescaleDB()
         # —— 策略内轻量持仓状态（用于止损/止盈判定） ——
-        self._pos: int = 0                  # 0=空仓；1=持有多头（当前实现不做做空）
+        self._pos: int = 0                  # 0=空仓；1=持有多头；-1=持有空头
         self._entry_price: Optional[float] = None
         self._entry_ts: Optional[datetime] = None
         # —— 止盈管理相关状态 ——
@@ -99,6 +102,7 @@ class MABreakoutStrategy:
         self._remain_frac: float = 0.0      # 估计剩余仓位比例（仅用于策略内止盈序列控制）
         self._trail_stop: Optional[float] = None  # 移动止损价格（不可下降）
         self._entry_high: Optional[float] = None  # 入场后最高价（用于移动止损）
+        self._entry_low: Optional[float] = None   # 入场后最低价（用于空头移动止损）
         self._init_risk: Optional[float] = None   # 以“最近一次入场的有效止损价”计算的每单位风险 R（entry - stop）
 
     # --------------------
@@ -370,10 +374,21 @@ class MABreakoutStrategy:
 
         reason = "multi_indicator"
         out_sig = base_sig
-        # 长仅守卫：空仓的 SELL 不开空，改为 HOLD（与回测一致）
+        # 做空入场过滤：空仓 SELL 仅在允许做空且通过环境/确认加严时才保留
         if out_sig == "SELL" and (self._pos is None or self._pos <= 0):
-            logger.info("[长仅守卫] inst_id={} 空仓 SELL 改为 HOLD", self.cfg.inst_id)
-            out_sig = "HOLD"
+            if not bool(self.cfg.allow_short):
+                logger.info("[空头关闭] inst_id={} 未启用 allow_short，空仓 SELL 改为 HOLD", self.cfg.inst_id)
+                out_sig = "HOLD"
+            else:
+                bb_mid_c = float(bb_mid.iloc[-2]) if not np.isnan(float(bb_mid.iloc[-2])) else float('nan')
+                short_need = int(max(1, min(4, int(self.cfg.confirm_min) + int(self.cfg.short_confirm_extra))))
+                env_ok = (not np.isnan(bb_mid_c)) and (cbar < bb_mid_c)
+                confirm_ok = (sell_confirms >= short_need)
+                dir_ok = (macd_bear_ok or aroon_bear_ok)
+                rsi_ok = (rsi1c is None) or (rsi1c <= float(self.cfg.rsi_sell) + 5.0)
+                if not (env_ok and confirm_ok and dir_ok and rsi_ok):
+                    logger.info("[做空过滤未通过] inst_id={} env={} confirm={} dir={} rsi={}", self.cfg.inst_id, env_ok, confirm_ok, dir_ok, rsi_ok)
+                    out_sig = "HOLD"
         size_frac_suggest: Optional[float] = None  # 建议的部分平仓比例（仅在 SELL 且部分平仓时给出）
 
         # ============ 止盈模块（TakeProfit）============
@@ -468,6 +483,92 @@ class MABreakoutStrategy:
                 reason = f"stoploss_{stop_hit}"
                 size_frac_suggest = float(self._remain_frac or 1.0)
 
+        # ============ 空头止盈/止损（与多头对称）============
+        tp_triggered_s = False
+        if self._pos < 0 and self._entry_price is not None:
+            # 入场后最低价 & 空头移动止损（向上）
+            low_series_val = (float(ohlc["low"].iloc[-1]) if not np.isnan(float(ohlc["low"].iloc[-1])) else None)
+            if low_series_val is not None:
+                if self._entry_low is None:
+                    self._entry_low = low_series_val
+                else:
+                    self._entry_low = min(self._entry_low, low_series_val)
+            if atr1 is not None and atr1 > 0 and self._entry_low is not None:
+                trail_cand_s = float(self._entry_low) + float(self.cfg.tp_trail_atr_mult) * float(atr1)
+                if self._trail_stop is None:
+                    self._trail_stop = trail_cand_s
+                else:
+                    self._trail_stop = min(self._trail_stop, trail_cand_s)
+
+            # Aroon 反转：全平（空头对应为 Down 不再领先 Up）
+            aroon_rev_s = False
+            if a_up0 is not None and a_dn0 is not None and a_up1 is not None and a_dn1 is not None:
+                aroon_rev_s = (a_dn0 >= a_up0) and (a_up1 > a_dn1)
+            if aroon_rev_s and (self._remain_frac is None or self._remain_frac > 0):
+                out_sig = "SELL"
+                reason = "takeprofit_aroon_rev"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+                tp_triggered_s = True
+
+            # 空头移动止损触发（价格上穿 trail_stop）
+            if (not tp_triggered_s) and self._trail_stop is not None and c1 >= float(self._trail_stop):
+                out_sig = "SELL"
+                reason = "takeprofit_trail"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+                tp_triggered_s = True
+
+            # 空头 R 倍数分批止盈
+            if (not tp_triggered_s) and self._init_risk is not None and self._init_risk > 0:
+                r_mult_s = (float(self._entry_price) - c1) / float(self._init_risk)
+                if (not self._tp2_done) and r_mult_s >= float(self.cfg.tp_r2) and (self._remain_frac or 0.0) > 0:
+                    out_sig = "SELL"
+                    reason = "takeprofit_r2"
+                    size_frac_suggest = float(min(float(self.cfg.tp_frac2), float(self._remain_frac or 1.0)))
+                    tp_triggered_s = True
+                elif (not self._tp1_done) and r_mult_s >= float(self.cfg.tp_r1) and (self._remain_frac or 0.0) > 0:
+                    out_sig = "SELL"
+                    reason = "takeprofit_r1"
+                    size_frac_suggest = float(min(float(self.cfg.tp_frac1), float(self._remain_frac or 1.0)))
+                    tp_triggered_s = True
+
+            # 技术止盈（RSI 极值）
+            if (not tp_triggered_s) and rsi1 is not None and (rsi1 >= float(self.cfg.rsi_tp_high) or rsi1 <= float(self.cfg.rsi_tp_low)):
+                out_sig = "SELL"
+                reason = "takeprofit_rsi"
+                size_frac_suggest = float(min(float(self.cfg.rsi_tp_frac), float(self._remain_frac or 1.0) if (self._remain_frac is not None) else 1.0))
+                tp_triggered_s = True
+
+        # 空头止损（与多头对称，方向相反）
+        if (self._pos < 0) and (self._entry_price is not None) and (not tp_triggered_s):
+            stop_hit_s = None
+            # ATR 止损（向上）
+            if atr1 is not None and atr1 > 0:
+                atr_stop_s = float(self._entry_price) + float(self.cfg.atr_n) * float(atr1)
+                if c1 >= atr_stop_s:
+                    stop_hit_s = "atr"
+            # 固定百分比止损（向上）
+            sym_s = str(self.cfg.inst_id).upper()
+            pct_default_s = None
+            if sym_s.startswith("BTC"):
+                pct_default_s = float(self.cfg.stop_loss_pct_btc)
+            elif sym_s.startswith("ETH"):
+                pct_default_s = float(self.cfg.stop_loss_pct_eth)
+            stop_pct_s = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default_s
+            if stop_pct_s is not None and stop_pct_s > 0:
+                pct_stop_s = float(self._entry_price) * (1.0 + float(stop_pct_s))
+                if c1 >= pct_stop_s and stop_hit_s is None:
+                    stop_hit_s = "pct"
+            # 技术指标止损（多头反向）
+            macd_cross_up_s = (macd0 <= sig0) and (macd1 > sig1)
+            tech_stop_s = (c1 > bb_up1) or macd_cross_up_s
+            if tech_stop_s and stop_hit_s is None:
+                stop_hit_s = "tech"
+
+            if stop_hit_s is not None:
+                out_sig = "SELL"
+                reason = f"stoploss_{stop_hit_s}"
+                size_frac_suggest = float(self._remain_frac or 1.0)
+
         # ============ 策略内简单持仓状态机更新（支持部分止盈）============
         try:
             if out_sig == "BUY" and self._pos == 0:
@@ -495,6 +596,35 @@ class MABreakoutStrategy:
                     self._init_risk = float(self._entry_price) * 0.01
                 else:
                     self._init_risk = float(self._entry_price) - float(eff_stop)
+
+            elif out_sig == "SELL" and self._pos == 0 and bool(self.cfg.allow_short):
+                # 空头开仓：记录入场与初始风险 R（向上）
+                self._pos = -1
+                self._entry_price = c1
+                self._entry_ts = close.index[-1].to_pydatetime()
+                # 记录入场后最低价（用于空头移动止损）
+                try:
+                    self._entry_low = float(ohlc["low"].iloc[-1])
+                except Exception:
+                    self._entry_low = None
+                self._tp1_done = False
+                self._tp2_done = False
+                self._remain_frac = 1.0
+                self._trail_stop = None
+                # 计算空头的“有效止损价”（更近的那一个）：min(ATR 止损价, 百分比止损价)
+                eff_stop_s = None
+                if atr1 is not None and atr1 > 0:
+                    eff_stop_s = min(eff_stop_s or 1e18, float(self._entry_price) + float(self.cfg.atr_n) * float(atr1))
+                sym_s = str(self.cfg.inst_id).upper()
+                pct_default_s = float(self.cfg.stop_loss_pct_btc) if sym_s.startswith("BTC") else (float(self.cfg.stop_loss_pct_eth) if sym_s.startswith("ETH") else None)
+                stop_pct_s = float(self.cfg.stop_loss_pct) if (self.cfg.stop_loss_pct is not None) else pct_default_s
+                if stop_pct_s is not None and stop_pct_s > 0:
+                    eff_stop_s = min(eff_stop_s or 1e18, float(self._entry_price) * (1.0 + float(stop_pct_s)))
+                if eff_stop_s is None or eff_stop_s <= 0 or eff_stop_s <= float(self._entry_price):
+                    # 兜底：若无法得到有效止损，按 1% 计算 R
+                    self._init_risk = float(self._entry_price) * 0.01
+                else:
+                    self._init_risk = float(eff_stop_s) - float(self._entry_price)
 
             elif out_sig == "SELL" and self._pos == 1:
                 # 判断是否为“部分平仓”
@@ -524,6 +654,33 @@ class MABreakoutStrategy:
                     self._entry_price = None
                     self._entry_ts = None
                     self._entry_high = None
+                    self._trail_stop = None
+                    self._init_risk = None
+                    self._tp1_done = False
+                    self._tp2_done = False
+            elif out_sig == "SELL" and self._pos == -1:
+                # 买回平空（SELL 信号在主程序中作为 close 执行），支持部分平
+                if size_frac_suggest is not None and size_frac_suggest < 0.999:
+                    self._remain_frac = max(0.0, float(self._remain_frac or 0.0) - float(size_frac_suggest))
+                    if reason == "takeprofit_r1":
+                        self._tp1_done = True
+                    elif reason == "takeprofit_r2":
+                        self._tp2_done = True
+                    if self._remain_frac <= 1e-6:
+                        self._pos = 0
+                        self._entry_price = None
+                        self._entry_ts = None
+                        self._entry_low = None
+                        self._trail_stop = None
+                        self._init_risk = None
+                        self._tp1_done = False
+                        self._tp2_done = False
+                else:
+                    # 全量买回/止损/反转：清空状态
+                    self._pos = 0
+                    self._entry_price = None
+                    self._entry_ts = None
+                    self._entry_low = None
                     self._trail_stop = None
                     self._init_risk = None
                     self._tp1_done = False
